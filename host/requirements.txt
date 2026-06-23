@@ -1,0 +1,14 @@
+# Core (all viz)
+numpy
+pyserial
+
+# GPU 3D viz (live_hand_qt.py) - recommended
+pyqtgraph
+PyOpenGL
+PyQt5
+
+# Bluetooth (--ble)
+bleak
+
+# Legacy CPU viz (live_hand_viz.py) - optional fallback
+matplotlib
