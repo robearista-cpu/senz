@@ -95,6 +95,13 @@ senz/
 > The hardware-related folders are the current focus; the rest are placeholders
 > for the downstream phases.
 
+## Prototype
+
+An 8-hour proof-of-concept build demonstrating 4-finger flexion/extension and
+live hand orientation is documented in [`docs/PROTOTYPE.md`](docs/PROTOTYPE.md),
+with firmware in `firmware/senz_glove_prototype/` and a live visualization in
+`host/live_hand_viz.py` (supports a `--simulate` mode for hardware-free testing).
+
 ## Status
 
 Early stage — **hardware development is the active focus.** Sensing, streaming,

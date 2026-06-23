@@ -1,0 +1,56 @@
+==============================================================================
+ senz glove prototype - PINOUT  (1 potentiometer, no multiplexer)
+==============================================================================
+Boards: ESP32-C3 SuperMini, 1x pot, GY-BNO055, SSD1306 OLED
+Note: use 3V3 (not 5V) for all sensor power. Power the board via the 5V pin.
+The TCA9548A I2C mux is NOT used in this build (not needed for 2 I2C devices
+with different addresses, and it cannot read analog pots anyway).
+
+------------------------------------------------------------------------------
+ESP32-C3 SuperMini  ->  goes to
+------------------------------------------------------------------------------
+GPIO0   ->  Pot 1 wiper           [ADC1_CH0]
+GPIO6   ->  I2C SDA  (BNO055 SDA/TX  +  OLED SDA)
+GPIO7   ->  I2C SCL  (BNO055 SCL/RX  +  OLED SCL)
+3V3     ->  power rail: BNO055 VIN, OLED VCC, pot top leg
+GND     ->  ground rail: everything's GND
+5V      ->  battery board +5V output (power INTO the board)
+
+(Avoid GPIO2, GPIO8, GPIO9 - strapping/LED/BOOT pins.)
+To add more fingers: use GPIO1, GPIO3, GPIO4 (ADC1) and add them to
+FINGER_PINS[] in the firmware.
+
+------------------------------------------------------------------------------
+Potentiometer #1  ->  goes to        [voltage divider]
+------------------------------------------------------------------------------
+Outer leg A  ->  3V3
+Outer leg B  ->  GND        (swap A/B if the finger reads backwards)
+Wiper (mid)  ->  ESP32 GPIO0
+
+------------------------------------------------------------------------------
+GY-BNO055 IMU  ->  goes to        [I2C address 0x28]
+------------------------------------------------------------------------------
+VIN      ->  3V3
+GND      ->  GND
+SDA/TX   ->  ESP32 GPIO6
+SCL/RX   ->  ESP32 GPIO7
+ADD      ->  GND            (tie HIGH for address 0x29 instead)
+INT      ->  not connected
+BOOT     ->  not connected
+RST      ->  not connected
+
+------------------------------------------------------------------------------
+SSD1306 OLED 0.91"  ->  goes to     [I2C address 0x3C, shares bus with IMU]
+------------------------------------------------------------------------------
+GND      ->  GND
+VCC      ->  3V3
+SCL      ->  ESP32 GPIO7
+SDA      ->  ESP32 GPIO6
+
+------------------------------------------------------------------------------
+Power input
+------------------------------------------------------------------------------
+Battery board +5V out  ->  ESP32 SuperMini 5V pin
+Battery board GND      ->  ESP32 SuperMini GND
+(Set the battery board to 5.0 V. Do NOT feed a raw LiPo into the 3V3 pin.)
+==============================================================================
