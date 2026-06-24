@@ -207,6 +207,14 @@ calibrated. To bring them up after power-on:
 You can demo before it's fully calibrated — roll/pitch are usable almost
 immediately; yaw firms up once the mag score reaches 3.
 
+**Persist the calibration so you don't repeat the dance every boot.** Flash the
+standalone utility `firmware/senz_glove_calibrate` once, do the dance above
+following its serial prompts, and it saves the 22-byte calibration profile to
+the ESP32-C3's flash (NVS). Re-flash `senz_glove_prototype` and it loads that
+profile on every boot — the OLED shows `cal: restored`. If the magnetometer
+score drifts below 2 during a session the main firmware warns over serial and
+flags `! MAG CAL LOW` on the OLED; wave another figure-8 to recover.
+
 ## Known limitations (prototype)
 
 - No absolute hand position (IMU limitation — see scope note above).
@@ -216,9 +224,11 @@ immediately; yaw firms up once the mag score reaches 3.
 
 ## Next steps after the prototype
 
-- Read the BNO055 quaternion (reg 0x20) instead of Euler for gimbal-lock-free
-  orientation, and drive a 3D hand model with it.
-- Persist BNO055 calibration offsets so it starts calibrated.
-- WiFi/BLE streaming off the SuperMini (replace USB serial).
+- ~~Read the BNO055 quaternion (reg 0x20) instead of Euler~~ — done; the
+  firmware streams quaternions, which also dodges the SW_REV 0x0311 Euler bug.
+- ~~Persist BNO055 calibration offsets so it starts calibrated~~ — done via the
+  `senz_glove_calibrate` utility + NVS load on boot (see Calibration above).
+- WiFi/BLE streaming off the SuperMini (code is behind `USE_BLE`, off by
+  default per the drift-fix HLD; flip it to `true` to use it).
 - 3D hand model in the visualization.
 - Logging frames to `data/` for the eventual ML dataset.
