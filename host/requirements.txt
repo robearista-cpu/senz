@@ -12,3 +12,10 @@ bleak
 
 # Legacy CPU viz (live_hand_viz.py) - optional fallback
 matplotlib
+
+# Multi-IMU branch (multi-imu-finger-tracking)
+# Dataset prep / fusion (dataset_prep.py, fusion/) - needs pandas (numpy already above)
+pandas
+# Camera tracking (camera_tracker.py, dataset_recorder.py --camera) - optional, heavy
+mediapipe
+opencv-python

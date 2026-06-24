@@ -8,3 +8,9 @@ venv/
 # OS / editor
 .DS_Store
 Thumbs.db
+
+# Recorded datasets + generated artifacts (multi-imu branch)
+data/
+host/data/
+*.npz
+imu_calibration.json
