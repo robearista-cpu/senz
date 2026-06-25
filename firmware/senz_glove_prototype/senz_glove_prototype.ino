@@ -127,14 +127,17 @@ BLECharacteristic *pTxChar = nullptr;
 volatile bool bleConnected = false;
 
 class ServerCB : public BLEServerCallbacks {
-  // Called with connection info -> request a FAST connection interval so
-  // notifications flow quickly (this is the main lever for BLE "fps").
-  void onConnect(BLEServer *s, esp_ble_gatts_connect_evt_param *param) override {
+  // Request a FAST connection interval so notifications flow quickly
+  // (main lever for BLE "fps"). Using the conn-id overload here instead of
+  // the param-struct overload, since that struct's type/name differs between
+  // the Bluedroid and NimBLE backends and even between NimBLE-Arduino
+  // versions (esp_ble_gatts_cb_param_t vs ble_gap_conn_desc* vs
+  // NimBLEConnInfo&). getConnId()/conn-handle works the same on all of them.
+  void onConnect(BLEServer *s) override {
     bleConnected = true;
     // Units of 1.25 ms: 0x06 = 7.5 ms, 0x0C = 15 ms. latency 0, timeout 2 s.
-    s->updateConnParams(param->connect.remote_bda, 0x06, 0x0C, 0, 200);
+    s->updateConnParams(s->getConnId(), 0x06, 0x0C, 0, 200);
   }
-  void onConnect(BLEServer *s) override { bleConnected = true; }
   void onDisconnect(BLEServer *s) override {
     bleConnected = false;
     BLEDevice::startAdvertising();  // allow reconnect
