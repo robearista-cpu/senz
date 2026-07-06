@@ -7,6 +7,9 @@ pyqtgraph
 PyOpenGL
 PyQt5
 
+# v2 hand skeleton viz (senz_visualizer.py) - reuses senz_io numpy math (no scipy)
+vpython
+
 # Bluetooth (--ble)
 bleak
 

@@ -64,20 +64,30 @@ Uses the Nordic UART Service via `bleak`; the default device name is
 
 The v2 firmware (`firmware/senz_glove_v2/`, 10× MPU-6500 + BNO055) streams a
 fixed **180-byte binary frame** instead of CSV. Its host reader is
-**`senz_parser.py`**. Validate the stream — wired or hardware-free:
+**`senz_parser.py`** and its 3D viewer is **`senz_visualizer.py`**.
 
+**Validate the stream** (`senz_parser.py`) — wired or hardware-free:
 ```
 python senz_parser.py --simulate        # no hardware: synthetic frames + live Hz
 python senz_parser.py --port COM5        # wired: prints frame rate + drop count
 ```
-(v2 serial runs at 921600 baud by default; override with `--baud`.)
 
-> **v2 Bluetooth and the v2 3D visualizer are not built yet.** BLE transport
-> (MTU/conn-param/PHY) and the binary-frame visualizer + zero-pose calibration
-> are the supervised, max-effort tasks in the HLD. Until the firmware's Madgwick
-> filter lands, the 10 finger quaternions arrive as identity (a flat hand), so
-> `senz_parser.py` today is for **stream validation**, not finger animation. For
-> a moving 3D hand right now, use `live_hand_qt.py` above.
+**Multi-sensor 3D hand** (`senz_visualizer.py`) — VPython skeleton, one bone per
+IMU (11 total: wrist + 10 finger segments):
+```
+python senz_visualizer.py --simulate     # no hardware (wrist rocks)
+python senz_visualizer.py --port COM5     # wired USB serial
+```
+(v2 serial is 921600 baud by default; override with `--baud`. Needs `vpython`.)
+
+> **Fingers currently render flat.** The per-finger Madgwick fusion is not in the
+> firmware yet (supervised, max-effort), so the 10 finger quaternions arrive as
+> identity — the wrist orientation is live and moves the whole hand, but the
+> fingers don't articulate until fusion lands. The renderer + forward kinematics
+> are already correct and length-preserving; only the quaternion source is
+> pending. **v2 Bluetooth** and **zero-pose calibration** (`pose_offsets.json`,
+> auto-loaded if present) are likewise deferred. For a fully articulating hand
+> today, use `live_hand_qt.py` above (single-IMU pipeline).
 
 ---
 
@@ -92,6 +102,8 @@ python senz_parser.py --port COM5        # wired: prints frame rate + drop count
   (learns the column schema from the device banner at runtime).
 - `senz_parser.py` — v2 binary-frame reader (180-byte frame, daemon thread +
   freshest-frame queue). Serial + `--simulate`.
+- `senz_visualizer.py` — v2 VPython hand skeleton, one bone per IMU (rendering +
+  forward kinematics). Serial + `--simulate`. Fingers flat until fusion lands.
 
 ### Calibration
 - `imu_calibrate.py` — multi-IMU calibration application (HLD objective 2).

@@ -409,8 +409,8 @@ MPU-6500 has no magnetometer. A Madgwick or Mahony filter running at 200Hz on th
 |---|-------------|--------|
 | 12 | `senz_parser.py` — serial frame reader, background thread, queue output | ✅ Done (sim-tested; `--simulate` CLI) |
 | 13 | `senz_calibrate_pose.py` — zero-pose capture, saves `pose_offsets.json` | 🔲 Supervised (needs finger quaternions from #8) |
-| 14 | `senz_visualizer.py` — VPython 3D hand skeleton, 11 bones, 60Hz render | 🔲 Supervised (finger-relative-to-wrist kinematics) |
-| 15 | Visualizer validated: all 5 fingers move independently, wrist rotates hand | 🔲 Supervised |
+| 14 | `senz_visualizer.py` — VPython 3D hand skeleton, 11 bones, 60Hz render | ⚙️ Rendering + forward kinematics done (headless-tested, length-preserving); fingers render flat until fusion (#8) supplies real quaternions |
+| 15 | Visualizer validated: all 5 fingers move independently, wrist rotates hand | ⚙️ Wrist + independent per-finger articulation verified in unit tests; end-to-end on hardware pending #8 |
 | 16 | Python: BLE client (bleak) transport option — after BLE firmware verified | 🔲 Supervised |
 
 ---
