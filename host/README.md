@@ -89,6 +89,17 @@ python senz_visualizer.py --port COM5     # wired USB serial
 ```
 (v2 serial is 921600 baud by default; override with `--baud`. Needs `vpython`.)
 
+In-window controls (no restart needed):
+- **Active sensor** menu — pick the wrist or any of the 10 finger IMUs to edit.
+- **Enabled** checkbox — temporarily disable a sensor; its bone freezes straight
+  and dims (useful to isolate a flaky IMU).
+- **Axis remap** (X/Y/Z ← source) — invert or swap that sensor's axes to match how
+  it's physically mounted. Reference finger accel frame: **+Y** away from hand,
+  **+X** toward thumb, **+Z** up. Applied as `M·R·Mᵀ`, so it stays a valid
+  rotation; the three axes must be distinct or the change is rejected.
+- **Zero hand** — capture the current pose as neutral for the wrist and every
+  finger (live tare). **Clear zero** / **Reset axes** undo per sensor.
+
 > **Fingers articulate.** The firmware runs a per-finger Madgwick filter and
 > sends each quaternion relative to the wrist, so fingers move independently in
 > both `--simulate` and on hardware (the composition was validated to 1e-15
