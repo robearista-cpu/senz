@@ -9,6 +9,8 @@ PyQt5
 
 # v2 hand skeleton viz (senz_visualizer.py) - reuses senz_io numpy math (no scipy)
 vpython
+# vpython 7.6.5 imports pkg_resources; setuptools>=81 removed it (Python 3.12+)
+setuptools<81
 
 # Bluetooth (--ble)
 bleak
