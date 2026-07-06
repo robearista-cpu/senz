@@ -72,10 +72,19 @@ python senz_parser.py --simulate        # no hardware: synthetic frames + live H
 python senz_parser.py --port COM5        # wired: prints frame rate + drop count
 ```
 
+**Zero-pose calibration** (`senz_calibrate_pose.py`) — run once per session,
+before the visualizer, so a flat hand renders flat. Hold your hand flat/palm
+down/fingers straight; it averages each finger's quaternion and writes
+`pose_offsets.json` (which the visualizer auto-loads):
+```
+python senz_calibrate_pose.py --port COM5        # wired; prompts, then captures
+python senz_calibrate_pose.py --simulate --yes    # no hardware, no prompt
+```
+
 **Multi-sensor 3D hand** (`senz_visualizer.py`) — VPython skeleton, one bone per
 IMU (11 total: wrist + 10 finger segments):
 ```
-python senz_visualizer.py --simulate     # no hardware (wrist rocks)
+python senz_visualizer.py --simulate     # no hardware (wrist rocks, fingers curl)
 python senz_visualizer.py --port COM5     # wired USB serial
 ```
 (v2 serial is 921600 baud by default; override with `--baud`. Needs `vpython`.)
@@ -83,11 +92,10 @@ python senz_visualizer.py --port COM5     # wired USB serial
 > **Fingers articulate.** The firmware runs a per-finger Madgwick filter and
 > sends each quaternion relative to the wrist, so fingers move independently in
 > both `--simulate` and on hardware (the composition was validated to 1e-15
-> against the visualizer's math). Two pieces remain: **v2 Bluetooth** (still
-> serial-only), and **zero-pose calibration** — without a `pose_offsets.json`
-> (auto-loaded if present), fingers rest at the sensors' mounted orientation
-> rather than a tidy straight pose. Run `senz_visualizer.py --simulate` to see
-> the full pipeline move with no hardware.
+> against the visualizer's math). Run `senz_calibrate_pose.py` first for a tidy
+> flat-hand pose; the remaining pending piece is **v2 Bluetooth** (still
+> serial-only). Run `senz_visualizer.py --simulate` to see the full pipeline
+> move with no hardware.
 
 ---
 
@@ -106,6 +114,8 @@ python senz_visualizer.py --port COM5     # wired USB serial
   forward kinematics). Serial + `--simulate`. Fingers flat until fusion lands.
 
 ### Calibration
+- `senz_calibrate_pose.py` — v2 zero-pose capture; averages the flat-hand finger
+  quaternions and writes `pose_offsets.json` for `senz_visualizer.py`.
 - `imu_calibrate.py` — multi-IMU calibration application (HLD objective 2).
 - `fusion/madgwick.py` — 6-axis Madgwick AHRS baseline (HLD objective 6).
 
