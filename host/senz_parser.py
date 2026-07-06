@@ -174,9 +174,9 @@ class SerialFrameSource:
 class SimFrameSource:
     """Synthetic frames matching the v2 wire contract, for offline development.
 
-    Mirrors current firmware behaviour: a gently rocking wrist quaternion and
-    identity finger quaternions (fingers stay flat until the Madgwick filter is
-    implemented in the supervised session).
+    A gently rocking wrist quaternion plus per-finger curl, matching the
+    firmware contract: finger quaternions are expressed RELATIVE to the wrist
+    frame (q_rel), so the visualizer's Rw @ R(q_rel) recovers world orientation.
     """
 
     def __init__(self, rate=200):
@@ -187,7 +187,12 @@ class SimFrameSource:
         t = time.time() - self.t0
         half = math.radians(20 * math.sin(t * 0.5)) / 2  # +/-20 deg wrist roll
         bno = (math.cos(half), math.sin(half), 0.0, 0.0)
-        mpu = [(1.0, 0.0, 0.0, 0.0)] * NUM_IMU
+        # Each finger curls about its x-axis, phase-staggered so they move
+        # independently (relative-to-wrist quaternions, like the firmware sends).
+        mpu = []
+        for i in range(NUM_IMU):
+            ang = math.radians(35.0 * (0.5 + 0.5 * math.sin(t * 1.2 + i * 0.6)))
+            mpu.append((math.cos(ang / 2), math.sin(ang / 2), 0.0, 0.0))
         time.sleep(1.0 / self._rate)
         return Frame(int(t * 1000), bno, mpu)
 

@@ -14,13 +14,15 @@ Bone directions come purely from the IMU quaternions; positions chain forward
 position tracking -- the hand stays centered in the scene, which is correct for
 an IMU-only system (HLD "Known Limitation").
 
-STATUS: this is the rendering + forward-kinematics layer (high effort). The
-per-finger *fusion* (Madgwick) and the finger-relative-to-wrist quaternion
-composition are the supervised, max-effort tasks and are NOT done in the
-firmware yet -- so the 10 finger quaternions currently arrive as identity and
-the fingers render flat. The wrist still moves the whole hand. Once real finger
-quaternions stream, the composition in ``compute_skeleton`` (Rw @ R_finger) is
-the one line to validate in that supervised session.
+STATUS: rendering + forward kinematics, driven by real per-finger orientation.
+The firmware now runs a Madgwick filter per finger and sends each quaternion
+RELATIVE to the wrist frame (q_rel = conj(q_wrist) * q_finger), so the
+composition here -- Rw @ R(q_rel) -- recovers world orientation. That contract
+was validated numerically (Rw @ R(q_rel) == R(q_finger) to 1e-15). Fingers
+articulate on hardware and in --simulate. Remaining pending piece: a clean
+flat-hand zero pose needs senz_calibrate_pose.py (writes pose_offsets.json,
+auto-loaded below); without it, fingers rest at the sensors' mounted
+orientation rather than a tidy straight pose.
 
 Quaternion->rotation reuses ``senz_io.quat_to_matrix`` (pure numpy, normalized,
 no gimbal lock) -- no scipy needed.

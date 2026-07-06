@@ -399,8 +399,8 @@ MPU-6500 has no magnetometer. A Madgwick or Mahony filter running at 200Hz on th
 | 5 | Arduino: 200Hz polling loop, raw data all 10 | ✅ Done (`D` dumps raw; `SMPLRT_DIV=4`) |
 | 6 | Arduino: BNO055 I2C read + cal load on boot | ✅ Done (NVS offsets, `K` to save) |
 | 7 | Arduino: OLED status + loop timing display | ✅ Done (boot + ~1Hz heartbeat) |
-| 8 | Arduino: Madgwick filter, all 10 sensors | 🔲 Supervised (stub: `orientationOf()` returns identity) |
-| 9 | Arduino: 180-byte binary serial frame (0xAA header, 0xFF footer) | ✅ Done (carries identity finger quats until #8 lands) |
+| 8 | Arduino: Madgwick filter, all 10 sensors | ✅ Done (`madgwick.h`, beta=0.1; per-finger fusion + wrist-relative composition; math validated in Python vs the host reference filter — convergence, gravity recovery, and Rw·R(q_rel)=R(q_finger) to 1e-15). Not yet compiled/flashed (no toolchain here) |
+| 9 | Arduino: 180-byte binary serial frame (0xAA header, 0xFF footer) | ✅ Done (now carries fused per-finger quaternions) |
 | 10 | Arduino: loop profiling — confirm under 5ms sustained | ⚙️ Code in place (max/overrun counters); sustained rate unverified — needs hardware |
 | 11 | **Arduino: BLE MTU + conn param + notify — SUPERVISED ONLY** | 🔲 Supervised |
 
@@ -408,9 +408,9 @@ MPU-6500 has no magnetometer. A Madgwick or Mahony filter running at 200Hz on th
 | # | Deliverable | Status |
 |---|-------------|--------|
 | 12 | `senz_parser.py` — serial frame reader, background thread, queue output | ✅ Done (sim-tested; `--simulate` CLI) |
-| 13 | `senz_calibrate_pose.py` — zero-pose capture, saves `pose_offsets.json` | 🔲 Supervised (needs finger quaternions from #8) |
-| 14 | `senz_visualizer.py` — VPython 3D hand skeleton, 11 bones, 60Hz render | ⚙️ Rendering + forward kinematics done (headless-tested, length-preserving); fingers render flat until fusion (#8) supplies real quaternions |
-| 15 | Visualizer validated: all 5 fingers move independently, wrist rotates hand | ⚙️ Wrist + independent per-finger articulation verified in unit tests; end-to-end on hardware pending #8 |
+| 13 | `senz_calibrate_pose.py` — zero-pose capture, saves `pose_offsets.json` | 🔲 To do (fusion now supplies finger quaternions; visualizer auto-loads the offsets if present) |
+| 14 | `senz_visualizer.py` — VPython 3D hand skeleton, 11 bones, 60Hz render | ✅ Done (rendering + forward kinematics; fingers articulate in `--simulate` and on hardware) |
+| 15 | Visualizer validated: all 5 fingers move independently, wrist rotates hand | ⚙️ Independent per-finger articulation + rigid wrist rotation verified in unit tests; end-to-end on real hardware pending a flash |
 | 16 | Python: BLE client (bleak) transport option — after BLE firmware verified | 🔲 Supervised |
 
 ---

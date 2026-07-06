@@ -80,14 +80,14 @@ python senz_visualizer.py --port COM5     # wired USB serial
 ```
 (v2 serial is 921600 baud by default; override with `--baud`. Needs `vpython`.)
 
-> **Fingers currently render flat.** The per-finger Madgwick fusion is not in the
-> firmware yet (supervised, max-effort), so the 10 finger quaternions arrive as
-> identity — the wrist orientation is live and moves the whole hand, but the
-> fingers don't articulate until fusion lands. The renderer + forward kinematics
-> are already correct and length-preserving; only the quaternion source is
-> pending. **v2 Bluetooth** and **zero-pose calibration** (`pose_offsets.json`,
-> auto-loaded if present) are likewise deferred. For a fully articulating hand
-> today, use `live_hand_qt.py` above (single-IMU pipeline).
+> **Fingers articulate.** The firmware runs a per-finger Madgwick filter and
+> sends each quaternion relative to the wrist, so fingers move independently in
+> both `--simulate` and on hardware (the composition was validated to 1e-15
+> against the visualizer's math). Two pieces remain: **v2 Bluetooth** (still
+> serial-only), and **zero-pose calibration** — without a `pose_offsets.json`
+> (auto-loaded if present), fingers rest at the sensors' mounted orientation
+> rather than a tidy straight pose. Run `senz_visualizer.py --simulate` to see
+> the full pipeline move with no hardware.
 
 ---
 

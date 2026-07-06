@@ -14,16 +14,14 @@
  *   [0xAA][u32 t_ms][4f bno_quat][10 * 4f mpu_quat][0xFF]  = 182 bytes on wire
  *   Payload (between the markers) is 180 bytes: 4 + 16 + 160.
  *
- * SCOPE OF THIS FILE (per the v2 effort split):
- *   DONE here (high effort): SPI/I2C bring-up, 10x WHO_AM_I sweep, 200 Hz raw
- *   polling, gyro-bias calibration, BNO055 read + NVS cal load, OLED status,
- *   loop-timing profiler, and the binary frame packer.
+ * SCOPE OF THIS FILE:
+ *   SPI/I2C bring-up, 10x WHO_AM_I sweep, 200 Hz raw polling, gyro-bias
+ *   calibration, BNO055 read + NVS cal load, OLED status, loop-timing profiler,
+ *   binary frame packer, AND per-finger Madgwick fusion + finger-relative-to-
+ *   wrist quaternion composition (see orientationOf() and madgwick.h).
  *
- *   NOT here (max effort / supervised) -- left as clearly marked stubs so the
- *   frame format and host parser are already final:
- *     - Madgwick fusion per finger      -> orientationOf() returns identity
- *     - finger-relative-to-wrist frame  -> not applied (identity passthrough)
- *     - BLE MTU/conn-param/PHY transport -> not started (serial fallback only)
+ *   NOT here (supervised) -- serial is the validated fallback transport:
+ *     - BLE MTU/conn-param/PHY transport (not started)
  *
  * Serial command protocol (host -> device, newline-terminated):
  *   ?   re-emit the human-readable boot banner + sensor status
@@ -40,6 +38,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
+#include "madgwick.h"
 #include "mpu6500.h"
 
 // ============================================================================
@@ -100,6 +99,13 @@ Mpu6500 *imu[NUM_IMU] = {nullptr};
 bool imuPresent[NUM_IMU] = {false};
 int16_t gyroBias[NUM_IMU][3] = {{0}};   // LSB, subtracted before fusion
 uint8_t imuCount = 0;
+
+// Per-finger Madgwick filters (HLD beta=0.1). One orientation state each.
+MadgwickImu fusion[NUM_IMU];
+static const float MADGWICK_BETA = 0.1f;
+static const float DEG2RAD = 0.01745329252f;
+// raw gyro LSB -> rad/s: /16.4 LSB-per-dps then *deg2rad
+static const float GYRO_RAW_TO_RAD = DEG2RAD / Mpu6500::GYR_LSB_PER_DPS;
 
 bool bnoPresent = false, oledPresent = false;
 float bqw = 1, bqx = 0, bqy = 0, bqz = 0;
@@ -272,21 +278,25 @@ void calibrateGyroBias() {
 }
 
 // ============================================================================
-// Orientation -- MAX-EFFORT STUB (supervised session).
+// Orientation -- per-finger Madgwick fusion + wrist-relative composition.
 // ----------------------------------------------------------------------------
-// The real implementation runs a Madgwick filter per finger (accel+gyro,
-// beta=0.1, dt=0.005) and then expresses each finger quaternion RELATIVE to the
-// BNO055 wrist frame. Both are deliberately deferred: quaternion fusion + frame
-// composition is the correctness-critical math flagged for a supervised pass.
-//
-// Until then this returns the identity quaternion, so the frame format and the
-// host parser are already final -- the visualizer just shows a flat hand.
+// Runs this finger's 6-axis Madgwick filter on the latest sample, then expresses
+// the orientation RELATIVE to the BNO055 wrist frame so that rotating the whole
+// hand rigidly does NOT move the fingers:
+//     q_rel = conj(q_wrist) * q_finger      (host recovers q_wrist * q_rel)
+// gx/gy/gz are bias-corrected raw gyro LSB (converted to rad/s here); ax/ay/az
+// are raw accel LSB (Madgwick normalizes, so scale is irrelevant). dt in seconds.
 // ============================================================================
 void orientationOf(uint8_t i, int16_t gx, int16_t gy, int16_t gz, int16_t ax,
-                   int16_t ay, int16_t az, float q[4]) {
-  (void)i; (void)gx; (void)gy; (void)gz; (void)ax; (void)ay; (void)az;
-  // TODO(supervised): madgwickUpdate(i, ...) then compose with wrist frame.
-  q[0] = 1.0f; q[1] = 0.0f; q[2] = 0.0f; q[3] = 0.0f;
+                   int16_t ay, int16_t az, float dt, float qRel[4]) {
+  fusion[i].update(gx * GYRO_RAW_TO_RAD, gy * GYRO_RAW_TO_RAD,
+                   gz * GYRO_RAW_TO_RAD, (float)ax, (float)ay, (float)az, dt);
+  float qFinger[4];
+  fusion[i].quat(qFinger);
+  const float qWrist[4] = {bqw, bqx, bqy, bqz};
+  float qWristConj[4];
+  quatConj(qWrist, qWristConj);
+  quatMul(qWristConj, qFinger, qRel);
 }
 
 // ============================================================================
@@ -399,6 +409,7 @@ void setup() {
   // SPI: bring up the finger array, WHO_AM_I sweep, set 200 Hz (boot steps 3-5).
   imuArrayInit();
   loadGyroBias();
+  for (uint8_t i = 0; i < NUM_IMU; i++) fusion[i].setBeta(MADGWICK_BETA);
 
   printBanner();
   showHeartbeat();
@@ -417,10 +428,18 @@ void loop() {
   if (now - lastFrame < FRAME_US) return;
   lastFrame = now;
 
+  // Actual elapsed time for the Madgwick integration (robust to loop slip).
+  static uint32_t lastFusionUs = 0;
+  float dt = (lastFusionUs == 0) ? (1.0f / SAMPLE_HZ)
+                                 : (now - lastFusionUs) * 1e-6f;
+  lastFusionUs = now;
+  if (dt <= 0.0f || dt > 0.05f) dt = 1.0f / SAMPLE_HZ;  // clamp glitches
+
   uint32_t t0 = micros();
   uint32_t t_ms = millis();
 
-  // 1-4. Poll all 10 finger IMUs, bias-correct gyro, compute orientation (stub).
+  // 1-4. Poll all 10 finger IMUs, bias-correct gyro, run Madgwick fusion, and
+  // express each finger orientation relative to the wrist (see orientationOf).
   float mpuQuat[NUM_IMU][4];
   for (uint8_t i = 0; i < NUM_IMU; i++) {
     if (!imuPresent[i]) {
@@ -433,7 +452,7 @@ void loop() {
     gx -= gyroBias[i][0];
     gy -= gyroBias[i][1];
     gz -= gyroBias[i][2];
-    orientationOf(i, gx, gy, gz, ax, ay, az, mpuQuat[i]);
+    orientationOf(i, gx, gy, gz, ax, ay, az, dt, mpuQuat[i]);
   }
 
   // 5. Wrist reference at ~100 Hz (every 2nd loop). NOTE: the HLD text says
@@ -444,7 +463,7 @@ void loop() {
     bnoCal = bnoRead8(BNO_CALIB_STAT);
   }
 
-  // 6. (deferred) express fingers relative to wrist -- see orientationOf().
+  // 6. Fingers already expressed relative to the wrist frame in orientationOf().
   // 7-8. Pack and stream the binary frame (always on).
   writeFrame(t_ms, mpuQuat);
 
