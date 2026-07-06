@@ -1,0 +1,84 @@
+================================================================================
+ SENZ GLOVE — HARDWARE SPRINT v2  PIN LAYOUT
+ Board: ESP32-S3-DevKitC-1        HLD: docs/senz_glove_hld_v2.md
+================================================================================
+
+ All sensors run at 3.3V logic. NEVER connect 5V to any GPIO.
+ Power in: 5V USB power bank -> 5V header pin -> onboard reg -> 3V3 to sensors.
+
+--------------------------------------------------------------------------------
+ SHARED BUSES
+--------------------------------------------------------------------------------
+
+ I2C  (BNO055 wrist IMU + SSD1306 OLED share this bus, 400 kHz)
+   ESP32-S3 GPIO8  -> SDA
+   ESP32-S3 GPIO9  -> SCL
+
+ SPI  (all 10 MPU-6500 finger IMUs share this bus, Mode 3, 8 MHz start)
+   ESP32-S3 GPIO11 -> MOSI / SDI   (data to sensors)
+   ESP32-S3 GPIO12 -> SCLK         (clock)
+   ESP32-S3 GPIO13 -> MISO / SDO   (data from sensors)
+   Chip-select (NCS) is one dedicated GPIO per sensor — see table below.
+
+================================================================================
+ MPU-6500  (x10, per-finger IMU) — module pin -> connection
+================================================================================
+ The breakout labels are I2C-style but the pins are multiplexed for SPI:
+
+   PIN     ROLE (SPI mode)        CONNECT TO
+   -----   --------------------   ------------------------------------------
+   VCC     3.3V power             3V3 rail
+   GND     ground                 GND rail
+   SCL     SPI clock  (SCLK)      GPIO12  (shared SCLK, all 10)
+   SDA     SPI data in (SDI/MOSI) GPIO11  (shared MOSI, all 10)
+   EDA     aux I2C master SDA     not connected
+   ECL     aux I2C master SCL     not connected
+   AD0     SPI data out (SDO/MISO)GPIO13  (shared MISO, all 10)
+   INT     data-ready interrupt   not connected (firmware polls at 200 Hz)
+   NCS     chip select (active LO) dedicated GPIO per sensor (table below)
+   FSYNC   frame sync             GND (tie low — unused, do not leave floating)
+
+ Per-sensor NCS chip-select map (HLD finger-placement table):
+
+   IMU #   NCS -> GPIO   FINGER / SEGMENT
+   -----   -----------   ------------------------
+     1       GPIO4       Index  proximal (base)
+     2       GPIO5       Index  distal   (tip)
+     3       GPIO6       Middle proximal
+     4       GPIO7       Middle distal
+     5       GPIO14      Ring   proximal
+     6       GPIO15      Ring   distal
+     7       GPIO16      Pinky  proximal
+     8       GPIO17      Pinky  distal
+     9       GPIO18      Thumb  base
+    10       GPIO21      Thumb  tip
+
+ NOTE: GPIO1 and GPIO2 are deliberately NOT used as CS lines — they sit
+ adjacent to strapping pins and can glitch a false CS during boot/reset.
+
+================================================================================
+ BNO055  (x1, wrist reference IMU) — module pin -> connection
+================================================================================
+
+   PIN       ROLE                 CONNECT TO
+   -------   ------------------    ------------------------------------------
+   VIN       3.3V power            3V3 rail
+   GND       ground                GND rail
+   SCL/RX    I2C clock             GPIO9   (shared I2C SCL)
+   SDA/TX    I2C data              GPIO8   (shared I2C SDA)
+   AD0       I2C address select    GND  -> address 0x28 (matches firmware)
+   INT       interrupt out         not connected
+   BOOT      boot / mode (PS1)     not connected (default = I2C mode)
+   REST      reset (active low)    not connected (internal pull-up)
+
+================================================================================
+ SSD1306 OLED  (x1, status display) — shares the I2C bus
+================================================================================
+   VCC -> 3V3      GND -> GND
+   SCL -> GPIO9    SDA -> GPIO8      I2C address 0x3C
+
+================================================================================
+ FREE GPIOs THIS SPRINT: GPIO38, GPIO39, GPIO40  (3 pins only)
+ Load cells next sprint will need an ADS1115 I2C ADC — direct HX711 GPIO
+ pairs do not fit the remaining pin budget. See HLD "GPIO Budget".
+================================================================================
