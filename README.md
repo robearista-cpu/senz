@@ -102,6 +102,14 @@ live hand orientation is documented in [`docs/PROTOTYPE.md`](docs/PROTOTYPE.md),
 with firmware in `firmware/senz_glove_prototype/` and a live visualization in
 `host/live_hand_viz.py` (supports a `--simulate` mode for hardware-free testing).
 
+## Hardware Sprint v2
+
+The current sprint expands to an ESP32-S3 with a 10× MPU-6500 per-finger IMU
+array on SPI, streaming a 180-byte binary frame at 200 Hz. See the design in
+[`docs/senz_glove_hld_v2.md`](docs/senz_glove_hld_v2.md), bring-up firmware in
+`firmware/senz_glove_v2/`, and the host frame reader `host/senz_parser.py`
+(supports `--simulate` for hardware-free testing).
+
 ## Status
 
 Early stage — **hardware development is the active focus.** Sensing, streaming,

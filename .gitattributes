@@ -1,0 +1,18 @@
+# Normalize line endings: store text as LF in the repo, check out native.
+* text=auto
+
+# Explicit text types (LF in the repo regardless of platform)
+*.py   text eol=lf
+*.ino  text eol=lf
+*.h    text eol=lf
+*.cpp  text eol=lf
+*.c    text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.json text eol=lf
+
+# Binary assets — never touch line endings or try to diff
+*.ai   binary
+*.png  binary
+*.jpg  binary
+*.pdf  binary
