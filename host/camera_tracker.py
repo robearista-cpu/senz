@@ -34,18 +34,51 @@ LANDMARK_NAMES = [
 ]
 
 
+def _coerce_source(src):
+    """Camera source: an int index, or a URL string (phone IP/RTSP camera).
+
+    ``"0"`` -> 0 (index); ``"http://..."`` stays a string for cv2.VideoCapture.
+    """
+    if isinstance(src, int):
+        return src
+    try:
+        return int(src)
+    except (TypeError, ValueError):
+        return src
+
+
+def _raw_landmarks(result):
+    """Extract (landmarks_norm, score, present, handedness) from a MP result.
+
+    landmarks_norm is a list of 21 (x, y, z) normalized to the image ([0,1] x/y,
+    relative z), or None if no hand. score is the handedness/detection confidence;
+    handedness is "Left"/"Right"/"Unknown".
+    """
+    if not result.multi_hand_landmarks:
+        return None, 0.0, 0, "Unknown"
+    lms = result.multi_hand_landmarks[0].landmark
+    coords = [(p.x, p.y, p.z) for p in lms]
+    score, handed = 0.0, "Unknown"
+    if result.multi_handedness:
+        cls = result.multi_handedness[0].classification[0]
+        score, handed = float(cls.score), cls.label
+    return coords, score, 1, handed
+
+
 class HandTracker:
     """Webcam hand tracker. Runs MediaPipe Hands on a background thread."""
 
     def __init__(self, camera=0, max_hands=1, det_conf=0.5, track_conf=0.5,
-                 show=False):
-        self.camera = camera
+                 show=False, keep_frame=False):
+        self.camera = _coerce_source(camera)   # int index OR URL string (phone cam)
         self.max_hands = max_hands
         self.det_conf = det_conf
         self.track_conf = track_conf
         self.show = show
+        self.keep_frame = keep_frame            # also retain the RGB frame + raw landmarks
 
         self._latest = None
+        self._frame = None    # (frame_rgb, landmarks_norm, score, present, t_cap) or None
         self._lock = threading.Lock()
         self._running = False
         self._thread = None
@@ -71,15 +104,19 @@ class HandTracker:
         try:
             while self._running:
                 ok, frame = cap.read()
+                t_cap = time.time()          # stamp CAPTURE time, before inference
                 if not ok:
                     time.sleep(0.01)
                     continue
                 frame = cv2.flip(frame, 1)
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 result = hands.process(rgb)
-                parsed = self._parse(result)
+                parsed = self._parse(result, t_cap)
                 with self._lock:
                     self._latest = parsed
+                    if self.keep_frame:
+                        lms, score, present, handed = _raw_landmarks(result)
+                        self._frame = (rgb, lms, score, present, t_cap, handed)
 
                 if self.show:
                     if result.multi_hand_landmarks:
@@ -95,16 +132,23 @@ class HandTracker:
             if self.show:
                 cv2.destroyAllWindows()
 
-    def _parse(self, result):
-        """MediaPipe result -> a flat, recorder-friendly dict (or None)."""
+    def _parse(self, result, t_cap=None):
+        """MediaPipe result -> a flat, recorder-friendly dict (or None).
+
+        ``t_host`` is stamped now (post-inference); ``t_cap`` is the capture time
+        passed in from _run (pre-inference) -- their difference is the pipeline
+        latency, and t_cap is the timestamp to align on (see camera HLD C2).
+        """
         stamp = time.time()
+        if t_cap is None:
+            t_cap = stamp
         if not result.multi_hand_landmarks:
-            return {"t_host": stamp, "hand_present": 0}
+            return {"t_host": stamp, "t_cap": t_cap, "hand_present": 0}
         lms = result.multi_hand_landmarks[0].landmark
         handed = "Unknown"
         if result.multi_handedness:
             handed = result.multi_handedness[0].classification[0].label
-        out = {"t_host": stamp, "hand_present": 1, "handedness": handed}
+        out = {"t_host": stamp, "t_cap": t_cap, "hand_present": 1, "handedness": handed}
         for i, name in enumerate(LANDMARK_NAMES):
             out[f"{name}_x"] = lms[i].x
             out[f"{name}_y"] = lms[i].y
@@ -118,6 +162,17 @@ class HandTracker:
     def get_latest(self):
         with self._lock:
             return self._latest
+
+    def get_frame(self):
+        """Latest (frame_rgb, landmarks_norm, score, present, t_cap, handedness),
+        or None.
+
+        Requires ``keep_frame=True``. frame_rgb is the flipped RGB ndarray;
+        landmarks_norm is a list of 21 (x,y,z) normalized to the image (or None).
+        For an overlay UI that needs the image + raw landmarks together.
+        """
+        with self._lock:
+            return self._frame
 
     def stop(self):
         self._running = False
@@ -165,7 +220,8 @@ if __name__ == "__main__":
     import argparse
 
     ap = argparse.ArgumentParser(description="senz MediaPipe hand tracker")
-    ap.add_argument("--camera", type=int, default=0, help="camera index")
+    ap.add_argument("--camera", default="0",
+                    help="camera index (0,1,...) or a URL (phone IP/RTSP camera)")
     ap.add_argument("--record", metavar="CSV", help="record landmarks to CSV")
     ap.add_argument("--duration", type=float, default=0, help="seconds (0 = until q)")
     args = ap.parse_args()

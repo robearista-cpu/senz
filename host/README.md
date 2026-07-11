@@ -137,6 +137,24 @@ python senz_v3_qt.py --port COM5 --hand right      # wired glove @ 921600
 python senz_v3_tactile_sim.py                       # sim alone: print a few frames
 ```
 
+### Camera setup & alignment (`camera_setup.py`)
+
+Since fingers come from the **camera** (as ground-truth labels, per
+`docs/senz_camera_hld.md`), **`camera_setup.py`** helps you frame and light the phone
+camera *before* recording. It's a native PyQt5 window: the live feed with a **MediaPipe
+hand-skeleton overlay** (what the tracker sees), an **actionable warnings HUD** ("too
+dark", "move closer", "blurry", "change angle", handedness-mismatch...), a **readiness**
+banner, and light/dark themes with a **toggle button per overlay/panel**. When the
+framing is good, **Copy recorder command** hands off to `dataset_recorder.py`.
+
+```
+python camera_setup.py                    # default webcam (index 0)
+python camera_setup.py --source 1          # another camera index
+python camera_setup.py --source http://<phone-ip>:port/video   # phone IP camera
+python camera_setup.py --demo               # no webcam/mediapipe (synthetic feed)
+```
+Needs `opencv-python` + `mediapipe` for a real camera; `--demo` runs the UI without them.
+
 ---
 
 ## Hardware Sprint v3 prototype — native GPU visualizer
@@ -229,7 +247,12 @@ free. Palm taxels capture power/enclosing grasps the fingertips miss.
 - `dataset_prep.py` — ML dataset preparation (HLD objective 7).
 - `dataset_recorder.py` — unified multi-modal recorder (HLD objective 5).
 - `force_pipeline.py` — Velostat force-sensor processing (HLD objective 4).
-- `camera_tracker.py` — MediaPipe Hands camera tracking (HLD objective 3).
+- `camera_tracker.py` — MediaPipe Hands camera tracking (HLD objective 3). Accepts a
+  camera index or a phone IP/RTSP URL; `keep_frame=True` exposes the frame + raw
+  landmarks (+ capture-time stamp) via `get_frame()` for overlay UIs.
+- **`camera_setup.py`** — camera setup & alignment UI: live feed + skeleton overlay +
+  quality warnings + readiness, light/dark themes, per-overlay toggles; `--demo` for no
+  hardware. Pure-numpy metric/`assess` core is headless-testable.
 
 ## Notes
 - The glove streams quaternions (no gimbal lock), so the hand won't flip when
