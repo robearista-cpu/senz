@@ -37,7 +37,7 @@ import hand_model as hmod
 from senz_v3_qt import (
     THEMES, SensorConfigV3, compute_skeleton, finger_imu_map, make_palm,
     build_wrist_palm, align_z_to, ThreadedMultiReader, _wrist_quat, FORCE_BASE,
-    FORCE_FINGERTIP, FOREARM_LEN, WRIST_RADIUS, _EY)
+    FORCE_FINGERTIP, FOREARM_LEN, WRIST_RADIUS, PALM_LEN, _EY)
 
 # ----------------------------------------------------------------------------
 # Mesh geometry helpers (pure numpy -- headless-testable)
@@ -117,6 +117,28 @@ def _grip_of(finger, fp):
     return float(np.mean(vals)) if vals else 0.0
 
 
+# --- low-poly box primitive (the "video-game hand" style) -------------------
+# 8 corners of a unit cube in [-0.5, 0.5]^3, ordered so the 12 triangles below
+# wind consistently. A blocky box per bone + palm = a simple low-poly hand.
+_BOX_CORNERS = np.array([(sx, sy, sz) for sx in (-1, 1) for sy in (-1, 1)
+                         for sz in (-1, 1)], dtype=float) * 0.5
+_BOX_FACES = np.array([
+    (0, 1, 3), (0, 3, 2),   # -x        corner index = (sx,sy,sz) bits, sx outer
+    (4, 6, 7), (4, 7, 5),   # +x
+    (0, 4, 5), (0, 5, 1),   # -y
+    (2, 3, 7), (2, 7, 6),   # +y
+    (0, 2, 6), (0, 6, 4),   # -z
+    (1, 5, 7), (1, 7, 3),   # +z
+], dtype=int)
+
+
+def oriented_box(center, R, half):
+    """8 verts + 12 faces of a box at ``center``, oriented by rotation ``R``, with
+    per-axis half-extents ``half``. Pure numpy (headless-testable)."""
+    verts = (np.asarray(R) @ (_BOX_CORNERS * np.asarray(half, dtype=float)).T).T
+    return verts + np.asarray(center, dtype=float), _BOX_FACES
+
+
 # ----------------------------------------------------------------------------
 # Mesh renderer (pyqtgraph OpenGL) -- imported lazily so headless import works
 # ----------------------------------------------------------------------------
@@ -185,13 +207,60 @@ class MeshHand:
             self.joint_base[lm] = col
         self._tip_joint = {FORCE_FINGERTIP[fg]: fg for fg in self._force_fingers}
 
-        # Palm taxel glow (additive points on the palm surface).
+        # Palm taxel glow (additive points on the palm surface) -- shown in every
+        # style, since it's tactile data, not geometry.
         self.palm_scatter = None
         if self.palm_taxels:
             self.palm_scatter = gl.GLScatterPlotItem(
                 pos=np.zeros((len(self.palm_taxels), 3)), size=0.001, pxMode=False)
             self.palm_scatter.setGLOptions("additive")
             view.addItem(self.palm_scatter)
+
+        # ---- Low-poly ("video-game hand") style: chunky flat-shaded boxes ----
+        lp_kw = dict(smooth=False, shader="shaded", drawEdges=False, glOptions="opaque")
+        self.lp_forearm = gl.GLMeshItem(vertexes=_BOX_CORNERS, faces=_BOX_FACES,
+                                        color=self._metallic + (1.0,), **lp_kw)
+        view.addItem(self.lp_forearm)
+        self.lp_palm = gl.GLMeshItem(vertexes=_BOX_CORNERS, faces=_BOX_FACES,
+                                     color=self._shade(self._metallic, 1.05) + (1.0,), **lp_kw)
+        view.addItem(self.lp_palm)
+        self.lp_bone_items = []
+        for a, b in self._bones:
+            it = gl.GLMeshItem(vertexes=_BOX_CORNERS, faces=_BOX_FACES,
+                               color=finger_base_color(b, self._metallic) + (1.0,), **lp_kw)
+            view.addItem(it)
+            self.lp_bone_items.append(it)
+
+        # ---- Point cloud: the fused landmark positions (toggle overlay) ----
+        self.points_item = gl.GLScatterPlotItem(
+            pos=np.zeros((len(self._lms), 3)), size=0.16, pxMode=False)
+        self.points_item.setGLOptions("additive")
+        view.addItem(self.points_item)
+        self._point_colors = np.array([hmod.joint_color(lm) + (1.0,) for lm in self._lms])
+
+        # Style groups for show/hide; capsule is the default.
+        self._capsule = ([self.forearm, self.palm] + self.bone_items
+                         + list(self.joint_items.values()))
+        self._lowpoly = [self.lp_forearm, self.lp_palm] + self.lp_bone_items
+        self.style = "capsule"
+        self.show_points = False
+        self._apply_visibility()
+
+    def _apply_visibility(self):
+        for it in self._capsule:
+            it.setVisible(self.style == "capsule")
+        for it in self._lowpoly:
+            it.setVisible(self.style == "lowpoly")
+        self.points_item.setVisible(self.show_points)
+
+    def set_style(self, style):
+        """'capsule' (organic) | 'lowpoly' (blocky game hand) | 'none' (points only)."""
+        self.style = style if style in ("capsule", "lowpoly", "none") else "capsule"
+        self._apply_visibility()
+
+    def set_points(self, on):
+        self.show_points = bool(on)
+        self.points_item.setVisible(self.show_points)
 
     @staticmethod
     def _shade(c, k):
@@ -212,19 +281,27 @@ class MeshHand:
         pts = skel["points"]
         grips = {fg: _grip_of(fg, fp) for fg in self._force_fingers}
 
+        if self.style == "capsule":
+            self._update_capsule(wp, Rf, Rh, pts, grips)
+        elif self.style == "lowpoly":
+            self._update_lowpoly(wp, Rf, Rh, pts, grips)
+        if self.show_points:
+            self.points_item.setData(pos=np.array([pts[lm] for lm in self._lms]),
+                                     color=self._point_colors, size=0.16)
+        self._palm_patch(wp, Rh, fp)
+
+    def _update_capsule(self, wp, Rf, Rh, pts, grips):
         v, f = build_wrist_palm(wp, Rf, Rh, half_w=1.85, half_t=0.46, arch=0.5)
         self.palm.setMeshData(vertexes=v, faces=f)
         fa_dir = Rf @ (-_EY)                       # forearm points back from the wrist
         self.forearm.setMeshData(vertexes=self._tube(self._fa_v, wp, wp + fa_dir * FOREARM_LEN),
                                  faces=self._fa_f)
-
         for (a, b), verts, faces, it, base in zip(self._bones, self._bone_v,
                                                   self._bone_f, self.bone_items, self.bone_base):
             it.setMeshData(vertexes=self._tube(verts, pts[a], pts[b]), faces=faces)
             fg = self._tip_bone.get((a, b))
             if fg is not None:
                 it.setColor(glow_color(base, grips[fg]) + (1.0,))
-
         for lm, jt in self.joint_items.items():
             r = landmark_radius(lm)
             fg = self._tip_joint.get(lm)
@@ -236,7 +313,23 @@ class MeshHand:
             else:
                 jt.setMeshData(vertexes=self._sphere_at(pts[lm], r), faces=self._sf)
 
-        self._palm_patch(wp, Rh, fp)
+    def _update_lowpoly(self, wp, Rf, Rh, pts, grips):
+        fa_dir = Rf @ (-_EY)
+        v, f = oriented_box(wp + fa_dir * (FOREARM_LEN * 0.5), align_z_to(fa_dir),
+                            (WRIST_R, WRIST_R, FOREARM_LEN * 0.5))
+        self.lp_forearm.setMeshData(vertexes=v, faces=f)
+        cen = wp + Rh @ np.array([0.0, PALM_LEN * 0.55, 0.0])
+        v, f = oriented_box(cen, Rh, (1.5, PALM_LEN * 0.6, 0.30))
+        self.lp_palm.setMeshData(vertexes=v, faces=f)
+        for (a, b), it, base in zip(self._bones, self.lp_bone_items, self.bone_base):
+            d = pts[b] - pts[a]
+            L = max(1e-6, float(np.linalg.norm(d)))
+            w = 0.5 * (landmark_radius(a) + landmark_radius(b)) * 1.25
+            v, f = oriented_box((pts[a] + pts[b]) * 0.5, align_z_to(d), (w, w, L * 0.5))
+            it.setMeshData(vertexes=v, faces=f)
+            fg = self._tip_bone.get((a, b))
+            if fg is not None:
+                it.setColor(glow_color(base, grips[fg]) + (1.0,))
 
     def _palm_patch(self, wp, Rh, fp):
         if self.palm_scatter is None or not fp:
@@ -255,7 +348,7 @@ class MeshHand:
 # Compact "studio" control panel
 # ----------------------------------------------------------------------------
 class StudioPanel:
-    def __init__(self, on_zero_hand, on_zero_force):
+    def __init__(self, on_zero_hand, on_zero_force, on_style=None, on_points=None):
         from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
         panel = QtWidgets.QWidget()
@@ -269,6 +362,24 @@ class StudioPanel:
         lay.addWidget(QtWidgets.QLabel("<b>senz hand studio</b>"))
         lay.addWidget(QtWidgets.QLabel(
             "<i>the fully-fused hand: orientation + articulation + tactile glow</i>"))
+
+        # View: mesh style + point-cloud overlay.
+        lay.addWidget(QtWidgets.QLabel("<b>View</b>"))
+        srow = QtWidgets.QHBoxLayout()
+        srow.addWidget(QtWidgets.QLabel("Mesh:"))
+        self.style_box = QtWidgets.QComboBox()
+        self.style_box.addItems(["Capsule (smooth)", "Low-poly (game)", "None"])
+        self._style_keys = ["capsule", "lowpoly", "none"]
+        if on_style:
+            self.style_box.currentIndexChanged.connect(
+                lambda i: on_style(self._style_keys[i]))
+        srow.addWidget(self.style_box)
+        lay.addLayout(srow)
+        self.points_cb = QtWidgets.QCheckBox("Point cloud overlay")
+        if on_points:
+            self.points_cb.toggled.connect(on_points)
+        lay.addWidget(self.points_cb)
+
         for text, cb in (("Zero hand (tare pose)", on_zero_hand),
                          ("Zero force", on_zero_force)):
             b = QtWidgets.QPushButton(text)
@@ -397,7 +508,8 @@ def main():
     def zero_force():
         forces.__init__(schema.nforce, rate=schema.rate or 200)
 
-    panel = StudioPanel(lambda: zero_hand(), lambda: zero_force())
+    panel = StudioPanel(lambda: zero_hand(), lambda: zero_force(),
+                        on_style=hand.set_style, on_points=hand.set_points)
     root.addWidget(panel.widget, stretch=1)
 
     def apply_theme(mode):

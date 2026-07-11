@@ -16,6 +16,42 @@ the legacy viz adds `matplotlib`. Dataset/camera tooling pulls in `pandas`,
 
 ---
 
+## What changed since the v2 hardware sprint
+
+The v2 sprint was a **5-finger flex-style glove** with a per-IMU stick-skeleton viz
+(`senz_visualizer.py`, VPython) over serial/BLE. Everything below is what v3 added.
+
+1. **v3 tactile-first build** (`firmware/senz_glove_v3_tactile`, `docs/PINOUT_v3_tactile.txt`):
+   scope narrowed to **solid tactile data + gross hand movement** — BNO055 wrist + **1
+   dorsum IMU** + a **15-taxel velostat** force array. Fine finger motion was deferred to
+   the camera. New **native-GPU visualizer** `senz_v3_qt.py` (pyqtgraph/OpenGL, PyQt5) with
+   a self-describing CSV stream (`senz_multi_io.py`) and host-side Madgwick fusion.
+2. **Camera as ground-truth labeler** (`docs/senz_camera_hld.md`): `camera_tracker.py`
+   (MediaPipe **Tasks** HandLandmarker — the legacy `solutions` API was removed on Py 3.13)
+   and `camera_setup.py`, a framing/lighting UI with a skeleton overlay + quality warnings.
+3. **Shared 21-landmark hand** (`hand_model.py`): one MediaPipe topology/geometry used by
+   both the visualizer and the camera UI, so they draw the same hand. The 3D hand became the
+   **21-landmark skeleton**, driven by **IMU orientation + finger-IMU articulation + optional
+   live camera fusion** (`--camera`; IMU orients, camera articulates the fingers).
+4. **Control hub** (`senz_hub.py` + double-click `senz_hub.bat`/`.vbs`): one launcher for the
+   camera setup, visualizer, and synced recorder from shared settings.
+5. **v3 pinch build** (`firmware/senz_glove_v3_pinch`, `docs/PINOUT_v3_pinch.txt`): the
+   focused **index/middle/thumb** glove for pinching-gesture ML — 8 IMUs (thumb 3 incl. a
+   9-axis base, index 2, middle 2, dorsum 1) + BNO wrist + **12 fingertip taxels**. Ring +
+   pinky are **omitted everywhere**. Pinch features (`pinch.py`) turn the pads into
+   distance/force/state. (Fixed a force-pipeline baseline startup transient along the way.)
+6. **Bluetooth** (`host/senz_ble_io.py` + BLE in the pinch firmware): the glove streams the
+   **same** self-describing CSV over **USB *and* BLE** (Nordic UART Service). USB-preferred at
+   boot, BLE fallback on battery. `--ble` on the viz/recorder, plus a connection mode in the hub.
+7. **Camera setup upgrades**: **Scan** enumerates all video devices (by name), open **several
+   cameras at once** in a grid, and **optimization** controls (resolution, fps, MJPG format for
+   USB bandwidth, detection downscale for CPU).
+8. **Hand studio** (`senz_hand_studio.py`): the "final result" — the same fused pose skinned
+   into a **mesh hand** (capsule *or* low-poly) with **tactile force glowing** on it, plus a
+   **point-cloud** overlay.
+
+---
+
 ## Running the visualization
 
 The visualizer is **`live_hand_qt.py`** (GPU-accelerated, 60–120 fps). It runs
@@ -280,14 +316,21 @@ It reuses `senz_v3_qt`'s pose + force + fusion pipeline and the 21-landmark `han
 so it's the exact same information rendered beautifully instead of diagnostically. Same
 transports/flags, and it honors the pinch build's 3-finger set.
 
+**View options** (in-panel, live): a **Mesh** selector — **Capsule** (smooth organic
+hand), **Low-poly** (a chunky, flat-shaded *video-game hand* of boxes), or **None** — plus
+a **Point cloud overlay** that shows the fused landmark positions as glowing points on top
+of whichever mesh (or on their own with Mesh = None). All three are the same fused data.
+
 ```
 python senz_hand_studio.py --simulate --sim pinch     # no hardware
 python senz_hand_studio.py --port COM5 --camera 0      # wired glove + camera fusion
 python senz_hand_studio.py --ble senz-pinch            # over Bluetooth
 ```
 
-Launch it from the **hub** ("Hand studio") too. (Rendering is pyqtgraph/OpenGL — a
-clean shaded capsule hand with force glow, not a film-grade PBR mesh.)
+Launch it from the **hub** ("Hand studio") too. Rendering is real-time **OpenGL** (via
+pyqtgraph's `GLViewWidget`) — a clean shaded hand with force glow, not a film-grade PBR
+mesh. The pose is 21 world points per frame, so it can also drive an external engine
+(Blender / three.js / a rigged glTF hand) later if you want higher fidelity.
 
 ---
 
