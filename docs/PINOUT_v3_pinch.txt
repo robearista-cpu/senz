@@ -140,6 +140,17 @@
  FREE GPIOs REMAINING: GPIO40 only.
    Mux channels C12..C15 are free if you want to add pads later (no new pins).
 
+--------------------------------------------------------------------------------
+ WIRELESS (no extra pins) — USB + Bluetooth LE
+--------------------------------------------------------------------------------
+ The firmware streams the same self-describing CSV over BOTH USB serial and
+ Bluetooth LE (Nordic UART Service, on-chip radio — no GPIO). It prefers USB (if a
+ host opens the CDC port at boot) and always advertises BLE as name "senz-pinch",
+ so on battery a BLE central gets the identical stream (USB full rate, BLE
+ decimated to ~50 Hz). Host: `--ble senz-pinch` (viz/recorder) or the hub's
+ Bluetooth mode. Powering from a LiPo instead of USB is what makes BLE useful —
+ keep the 3V3 regulator fed and never exceed 3.3V on any GPIO.
+
 ================================================================================
  PHYSICAL PLACEMENT & ORIENTATION — RIGHT HAND
 ================================================================================

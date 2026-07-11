@@ -37,11 +37,14 @@ GYR_LSB_PER_DPS = 16.4
 class Schema:
     """Column layout discovered from the firmware's ``# columns:`` header."""
 
-    def __init__(self, columns, nimu, nforce, rate):
+    def __init__(self, columns, nimu, nforce, rate, build=None):
         self.columns = columns
         self.nimu = nimu
         self.nforce = nforce
         self.rate = rate
+        # Firmware id from the banner ("v3pinch", "v3proto", ...) or None; lets the
+        # host tailor a build (e.g. the pinch build renders thumb/index/middle only).
+        self.build = build
         # Columns that should stay integers (everything but the BNO quaternion).
         self._float_cols = {"bno_qw", "bno_qx", "bno_qy", "bno_qz"}
 
@@ -59,7 +62,9 @@ class Schema:
         m = re.search(r"rate=(\d+)", banner)
         if m:
             rate = int(m.group(1))
-        return cls(cols, nimu, nforce, rate)
+        m = re.search(r"#\s*senz-(\S+)", banner)   # "# senz-v3pinch ..." -> "v3pinch"
+        build = m.group(1) if m else None
+        return cls(cols, nimu, nforce, rate, build)
 
     def parse(self, line):
         """CSV data line -> dict keyed by column name, or None if malformed."""

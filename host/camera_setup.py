@@ -351,7 +351,7 @@ _READY = {"green": ("READY TO RECORD", (60, 170, 90)),
 class VideoPanel:
     """QLabel that shows the frame as a pixmap with QPainter overlays."""
 
-    def __init__(self, theme_bg="#181b20"):
+    def __init__(self, theme_bg="#181b20", fingers=None):
         from pyqtgraph.Qt import QtCore, QtWidgets
 
         self.label = QtWidgets.QLabel()
@@ -360,6 +360,10 @@ class VideoPanel:
         self.label.setStyleSheet(f"background-color: {theme_bg};")
         self.widget = self.label
         self._buf = None
+        # Which fingers to overlay. The pinch build passes thumb/index/middle so
+        # the ring + pinky are omitted from the skeleton to match the visualizer.
+        self._conns = hmod.active_connections(fingers) if fingers else HAND_CONNECTIONS
+        self._lms = set(hmod.active_landmarks(fingers)) if fingers else set(range(N_LANDMARKS))
 
     def update_view(self, frame_rgb, landmarks, layers, occluded=False):
         from pyqtgraph.Qt import QtCore, QtGui
@@ -397,11 +401,13 @@ class VideoPanel:
                 p.setPen(QtGui.QPen(QtGui.QColor(240, 220, 60, 200), 2))
                 p.drawRect(QtCore.QRectF(tl, br))
             if layers.get("skeleton"):
-                for a, b in HAND_CONNECTIONS:
+                for a, b in self._conns:
                     p.setPen(QtGui.QPen(_qcolor(hmod.connection_color(a, b)), 3))
                     p.drawLine(px(landmarks[a]), px(landmarks[b]))
             if layers.get("joints"):
                 for i in range(min(N_LANDMARKS, len(landmarks))):
+                    if i not in self._lms:
+                        continue
                     tip = i in FINGERTIPS
                     if tip and occluded and layers.get("occlusion"):
                         col = QtGui.QColor(230, 70, 70, 240)
@@ -597,6 +603,9 @@ def main():
     ap.add_argument("--width", type=int, default=None, help="requested capture width")
     ap.add_argument("--height", type=int, default=None, help="requested capture height")
     ap.add_argument("--fps", type=int, default=None, help="requested capture fps")
+    ap.add_argument("--fingers", default=None,
+                    help="comma list of fingers to overlay (thumb,index,middle,ring,"
+                         "pinky). Default all; pass thumb,index,middle for the pinch build")
     args = ap.parse_args()
 
     from pyqtgraph.Qt import QtCore, QtWidgets
@@ -636,7 +645,8 @@ def main():
             width=cfg.get("width"), height=cfg.get("height"), req_fps=cfg.get("fps"),
             filters=cfg["filters"]).start()
 
-    video = VideoPanel(THEMES[cfg["theme"]]["gl_bg"])
+    active_fingers = hmod.parse_fingers(args.fingers) if args.fingers else None
+    video = VideoPanel(THEMES[cfg["theme"]]["gl_bg"], fingers=active_fingers)
     root.addWidget(video.widget, stretch=3)
 
     def on_connect(src):

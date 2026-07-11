@@ -33,6 +33,12 @@ HAND_CONNECTIONS = [
 FINGERTIPS = [4, 8, 12, 16, 20]
 N_LANDMARKS = 21
 
+# Finger order (thumb-side -> pinky-side) and the pinch build's active set. The
+# pinch glove only instruments thumb/index/middle, so the ring + pinky are omitted
+# from that build everywhere (rendering + camera overlay); see active_landmarks().
+FINGERS = ["thumb", "index", "middle", "ring", "pinky"]
+PINCH_FINGERS = ["thumb", "index", "middle"]
+
 # Landmark -> finger (0/wrist + the 5-9-13-17 cross-links render as "palm").
 FINGER_OF = ["palm"] + ["thumb"] * 4 + ["index"] * 4 + ["middle"] * 4 + \
             ["ring"] * 4 + ["pinky"] * 4
@@ -142,6 +148,33 @@ def pose_from_world(world_lms, hand="right"):
 def canonical(hand="right"):
     """The canonical open hand for the given handedness (IMU-only render)."""
     return mirror_hand(CANONICAL_HAND, hand)
+
+
+def parse_fingers(spec):
+    """A comma spec ('thumb,index,middle') -> validated finger list in canonical
+    order. Empty/None -> all five. Unknown names are ignored."""
+    if not spec:
+        return list(FINGERS)
+    want = {s.strip().lower() for s in str(spec).split(",") if s.strip()}
+    active = [f for f in FINGERS if f in want]
+    return active or list(FINGERS)
+
+
+def active_landmarks(fingers):
+    """Landmark indices to draw for a finger subset: the wrist (0) plus each
+    active finger's 4 landmarks, sorted. Omitted fingers (e.g. ring/pinky on the
+    pinch build) simply aren't returned."""
+    idx = [0]
+    for f in fingers:
+        idx += FINGER_LANDMARKS.get(f, [])
+    return sorted(set(idx))
+
+
+def active_connections(fingers):
+    """HAND_CONNECTIONS restricted to bones whose BOTH endpoints are active, so a
+    subset hand (thumb/index/middle) draws no dangling ring/pinky links."""
+    s = set(active_landmarks(fingers))
+    return [(a, b) for (a, b) in HAND_CONNECTIONS if a in s and b in s]
 
 
 def bend_fingers(pts, bends):

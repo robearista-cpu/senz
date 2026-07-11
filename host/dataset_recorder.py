@@ -43,8 +43,12 @@ def _session_dir(root, label):
 
 
 def run(port=None, camera=None, simulate=False, label="", duration=0.0,
-        root="data", nimu=3, nforce=5):
-    src = io.open_multi_source(port=port, simulate=simulate, nimu=nimu, nforce=nforce)
+        root="data", nimu=3, nforce=5, ble=None):
+    if ble:
+        from senz_ble_io import open_ble_source
+        src = open_ble_source(ble)
+    else:
+        src = io.open_multi_source(port=port, simulate=simulate, nimu=nimu, nforce=nforce)
     schema = src.schema
     forces = ForceArray(schema.nforce, rate=schema.rate or 200)
 
@@ -146,6 +150,8 @@ def run(port=None, camera=None, simulate=False, label="", duration=0.0,
 def main():
     ap = argparse.ArgumentParser(description="senz unified dataset recorder")
     ap.add_argument("--port", help="glove serial port (omit for --simulate)")
+    ap.add_argument("--ble", metavar="NAME",
+                    help="connect over Bluetooth LE (device name/address) instead of --port")
     ap.add_argument("--camera", type=int, default=None,
                     help="camera index to also record landmarks (omit to skip)")
     ap.add_argument("--simulate", action="store_true", help="no hardware")
@@ -154,7 +160,7 @@ def main():
     ap.add_argument("--root", default="data", help="dataset root directory")
     args = ap.parse_args()
     run(port=args.port, camera=args.camera, simulate=args.simulate,
-        label=args.label, duration=args.duration, root=args.root)
+        label=args.label, duration=args.duration, root=args.root, ble=args.ble)
 
 
 if __name__ == "__main__":

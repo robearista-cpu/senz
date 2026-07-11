@@ -35,10 +35,12 @@ PROGRAMS = [
 ]
 
 DEFAULT_HUB_CONFIG = {
-    "port": "",          # glove serial port; blank -> --simulate
+    "conn": "usb",       # connection mode: usb | bluetooth | simulate
+    "port": "",          # glove serial port (usb mode)
+    "ble": "senz-pinch", # BLE device name/address (bluetooth mode)
     "source": "0",       # camera index or URL; blank -> --demo (camera setup)
     "hand": "right",
-    "sim": "tactile",    # senz_v3_qt --sim
+    "sim": "tactile",    # senz_v3_qt --sim (also which sim runs in simulate mode)
     "label": "",
     "fuse": False,       # feed the camera into the hand visualizer
     "theme": "dark",
@@ -64,26 +66,41 @@ def save_hub_config(path, cfg):
         json.dump({k: cfg.get(k) for k in DEFAULT_HUB_CONFIG}, fh, indent=2)
 
 
+def transport_args(cfg):
+    """Glove transport flags from the connection mode: USB serial, Bluetooth LE,
+    or simulate. Falls back to --simulate if the chosen mode has no target set."""
+    conn = cfg.get("conn", "usb")
+    port = str(cfg.get("port", "")).strip()
+    ble = str(cfg.get("ble", "")).strip()
+    if conn == "bluetooth" and ble:
+        return ["--ble", ble]
+    if conn == "usb" and port:
+        return ["--port", port]
+    return ["--simulate"]
+
+
 def build_args(program, cfg):
     """Return the script + argv for a program given the shared settings."""
     cam = str(cfg.get("source", "")).strip()
-    port = str(cfg.get("port", "")).strip()
     hand = cfg.get("hand", "right")
     sim = cfg.get("sim", "tactile")
     label = str(cfg.get("label", "")).strip()
     fuse = bool(cfg.get("fuse", False))
+    # The pinch build shows only thumb/index/middle. The visualizer infers this
+    # from --sim pinch / the firmware banner on its own; the generic camera tool
+    # doesn't, so it gets an explicit --fingers.
+    pinch_fingers = ["--fingers", "thumb,index,middle"] if sim == "pinch" else []
 
     if program == "camera_setup":
-        return ["camera_setup.py"] + (["--source", cam] if cam else ["--demo"])
+        base = ["camera_setup.py"] + (["--source", cam] if cam else ["--demo"])
+        return base + pinch_fingers
     if program == "viz":
-        a = ["senz_v3_qt.py", "--hand", hand, "--sim", sim]
-        a += (["--port", port] if port else ["--simulate"])
+        a = ["senz_v3_qt.py", "--hand", hand, "--sim", sim] + transport_args(cfg)
         if fuse and cam:
             a += ["--camera", cam]
         return a
     if program == "record":
-        a = ["dataset_recorder.py"]
-        a += (["--port", port] if port else ["--simulate"])
+        a = ["dataset_recorder.py"] + transport_args(cfg)
         if cam.isdigit():                 # recorder takes an int camera index only
             a += ["--camera", cam]
         if label:
@@ -129,10 +146,26 @@ def main():
     theme_btn = QtWidgets.QPushButton(f"Theme: {cfg['theme'].capitalize()}")
     lay.addWidget(theme_btn)
 
+    lay.addWidget(QtWidgets.QLabel("<b>Connection</b>"))
+    cform = QtWidgets.QFormLayout()
+    conn_box = QtWidgets.QComboBox()
+    conn_box.addItems(["usb", "bluetooth", "simulate"])
+    conn_box.setCurrentText(cfg.get("conn", "usb"))
+    port_edit = QtWidgets.QLineEdit(cfg["port"])
+    port_edit.setPlaceholderText("COM5 (USB serial)")
+    ble_row = QtWidgets.QHBoxLayout()
+    ble_edit = QtWidgets.QLineEdit(str(cfg.get("ble", "")))
+    ble_edit.setPlaceholderText("BLE name or address, e.g. senz-pinch")
+    ble_scan_btn = QtWidgets.QPushButton("Scan BLE")
+    ble_row.addWidget(ble_edit)
+    ble_row.addWidget(ble_scan_btn)
+    cform.addRow("Mode:", conn_box)
+    cform.addRow("USB port:", port_edit)
+    cform.addRow("Bluetooth:", ble_row)
+    lay.addLayout(cform)
+
     lay.addWidget(QtWidgets.QLabel("<b>Shared settings</b>"))
     form = QtWidgets.QFormLayout()
-    port_edit = QtWidgets.QLineEdit(cfg["port"])
-    port_edit.setPlaceholderText("blank = simulate (no glove)")
     src_row = QtWidgets.QHBoxLayout()
     src_edit = QtWidgets.QLineEdit(str(cfg["source"]))
     src_edit.setPlaceholderText("index (0,1) or http URL; blank = demo")
@@ -149,7 +182,6 @@ def main():
     label_edit.setPlaceholderText("e.g. grasp_cup")
     fuse_cb = QtWidgets.QCheckBox("Fuse camera into the hand visualizer")
     fuse_cb.setChecked(bool(cfg["fuse"]))
-    form.addRow("Glove port:", port_edit)
     form.addRow("Camera:", src_row)
     form.addRow("Hand:", hand_box)
     form.addRow("Sim build:", sim_box)
@@ -157,8 +189,18 @@ def main():
     form.addRow("", fuse_cb)
     lay.addLayout(form)
 
+    def refresh_conn():
+        """Enable only the field(s) relevant to the chosen connection mode."""
+        mode = conn_box.currentText()
+        port_edit.setEnabled(mode == "usb")
+        ble_edit.setEnabled(mode == "bluetooth")
+        ble_scan_btn.setEnabled(mode == "bluetooth")
+    conn_box.currentTextChanged.connect(lambda _=None: refresh_conn())
+    refresh_conn()
+
     def sync_cfg():
-        cfg.update(port=port_edit.text().strip(), source=src_edit.text().strip(),
+        cfg.update(conn=conn_box.currentText(), port=port_edit.text().strip(),
+                   ble=ble_edit.text().strip(), source=src_edit.text().strip(),
                    hand=hand_box.currentText(), sim=sim_box.currentText(),
                    label=label_edit.text().strip(), fuse=fuse_cb.isChecked(),
                    theme=theme_state["mode"])
@@ -180,8 +222,8 @@ def main():
 
     lay.addStretch(1)
     hint = QtWidgets.QLabel(
-        "Blank port = simulate · blank camera = demo · one camera feeds one "
-        "program at a time.")
+        "Mode usb/bluetooth/simulate · blank camera = demo · one camera feeds one "
+        "program at a time. Pinch build (Sim = pinch) omits ring + pinky.")
     hint.setWordWrap(True)
     lay.addWidget(hint)
     save_btn = QtWidgets.QPushButton("Save settings")
@@ -245,6 +287,26 @@ def main():
         if cams:
             src_edit.setText(str(cams[0]))
     scan_btn.clicked.connect(on_scan)
+
+    def on_ble_scan():
+        status_bar.setText("scanning for Bluetooth devices (~6s)...")
+        QtWidgets.QApplication.processEvents()
+        try:
+            from senz_ble_io import scan_ble
+            devs = scan_ble()
+        except Exception as e:
+            status_bar.setText(f"BLE scan failed: {e}")
+            return
+        if not devs:
+            status_bar.setText("BLE: no devices found (bleak installed? glove on?)")
+            return
+        names = ", ".join(f"{n}" for n, _a in devs[:6])
+        status_bar.setText("BLE: " + names)
+        # Prefer a senz device; else the first found (use its address).
+        senz = next(((n, a) for n, a in devs if str(n).lower().startswith("senz")), None)
+        name, addr = senz or devs[0]
+        ble_edit.setText(name if str(name).lower().startswith("senz") else addr)
+    ble_scan_btn.clicked.connect(on_ble_scan)
 
     def apply_theme(mode):
         th = THEMES[mode]

@@ -387,11 +387,16 @@ class HandGL:
     sit at the thumb/index/middle fingertips and on the palm surface.
     """
 
-    def __init__(self, view, palm=None):
+    def __init__(self, view, palm=None, fingers=None):
         import pyqtgraph.opengl as gl
 
         self.gl = gl
         self.palm_taxels = palm or []
+        # Which fingers to draw. The pinch build passes thumb/index/middle so the
+        # ring + pinky are omitted entirely (no joints, no bones, no force pads).
+        self.fingers = list(fingers) if fingers else list(hmod.FINGERS)
+        self._conns = hmod.active_connections(self.fingers)
+        self._lms = hmod.active_landmarks(self.fingers)
         cyl = gl.MeshData.cylinder(rows=1, cols=16,
                                    radius=[BONE_RADIUS, BONE_RADIUS], length=1.0)
         self._cv, self._cf = cyl.vertexes(), cyl.faces()
@@ -415,24 +420,26 @@ class HandGL:
                                    color=(0.7, 0.7, 0.8, 1.0), **mesh_kw)
         view.addItem(self.wrist)
 
-        # One bone cylinder per HAND_CONNECTIONS edge, one sphere per landmark,
+        # One bone cylinder per ACTIVE connection, one sphere per ACTIVE landmark,
         # each colored from the shared hand model (camera-style per-finger colors).
         self.bones = []
-        for a, b in hmod.HAND_CONNECTIONS:
+        for a, b in self._conns:
             col = hmod.connection_color(a, b) + (1.0,)
             it = gl.GLMeshItem(vertexes=self._cv, faces=self._cf, color=col, **mesh_kw)
             view.addItem(it)
             self.bones.append(it)
         self.joints = []
-        for i in range(hmod.N_LANDMARKS):
+        for i in self._lms:
             col = hmod.joint_color(i) + (1.0,)
             jt = gl.GLMeshItem(vertexes=self._sv, faces=self._sf, color=col, **mesh_kw)
             view.addItem(jt)
             self.joints.append(jt)
 
-        # Force patches: a 2x2 scatter at each of thumb/index/middle fingertips.
+        # Force patches: a 2x2 scatter at each active thumb/index/middle fingertip.
         self.force_pts = {}
         for name in FORCE_FINGERTIP:
+            if name not in self.fingers:
+                continue
             sp = gl.GLScatterPlotItem(pos=np.zeros((4, 3)), size=0.001, pxMode=False)
             view.addItem(sp)
             self.force_pts[name] = sp
@@ -462,13 +469,13 @@ class HandGL:
         self.forearm.setMeshData(vertexes=self._cylinder(wp, wp + Rf @ (-_EY * FOREARM_LEN)),
                                  faces=self._cf)
         self.wrist.setMeshData(vertexes=self._sphere_at(wp, WRIST_RADIUS), faces=self._sf)
-        for (a, b), it in zip(hmod.HAND_CONNECTIONS, self.bones):
+        for (a, b), it in zip(self._conns, self.bones):
             it.setMeshData(vertexes=self._cylinder(pts[a], pts[b]), faces=self._cf)
-        for i, jt in enumerate(self.joints):
-            r = JOINT_RADIUS * (1.35 if i in hmod.FINGERTIPS else 1.0)
-            jt.setMeshData(vertexes=self._sphere_at(pts[i], r), faces=self._sf)
-        for name, tip_idx in FORCE_FINGERTIP.items():
-            self._force_patch(name, Rh, pts[tip_idx], fp)
+        for lm, jt in zip(self._lms, self.joints):
+            r = JOINT_RADIUS * (1.35 if lm in hmod.FINGERTIPS else 1.0)
+            jt.setMeshData(vertexes=self._sphere_at(pts[lm], r), faces=self._sf)
+        for name, sp in self.force_pts.items():
+            self._force_patch(name, Rh, pts[FORCE_FINGERTIP[name]], fp)
         self._palm_patch(wp, Rh, fp)
 
     def _palm_patch(self, wp, Rh, fp):
@@ -685,9 +692,19 @@ def main():
     ap.add_argument("--camera", metavar="SRC",
                     help="camera source (index or URL) to FUSE: the IMU supplies "
                          "hand orientation, the camera articulates the fingers")
+    ap.add_argument("--ble", metavar="NAME",
+                    help="connect over Bluetooth LE to this device name (Nordic "
+                         "UART Service) instead of a serial --port")
+    ap.add_argument("--fingers", metavar="LIST",
+                    help="comma list of fingers to draw (thumb,index,middle,ring,"
+                         "pinky). Default: all, or thumb,index,middle for the pinch "
+                         "build")
     args = ap.parse_args()
 
-    if args.simulate or not args.port:
+    if args.ble:
+        from senz_ble_io import open_ble_source
+        source = open_ble_source(args.ble)
+    elif args.simulate or not args.port:
         if args.sim == "proto":
             from senz_v3_sim import SimV3Source
             source = SimV3Source()
@@ -713,6 +730,16 @@ def main():
     # them; the tactile build (nimu=1) gets [] -> canonical open hand.
     imu_map = finger_imu_map(n_imu)
 
+    # Which fingers to draw. Explicit --fingers wins; otherwise the pinch build
+    # (via --sim pinch or a "pinch" firmware banner) omits the ring + pinky.
+    is_pinch = args.sim == "pinch" or "pinch" in (schema.build or "")
+    if args.fingers:
+        active_fingers = hmod.parse_fingers(args.fingers)
+    elif is_pinch:
+        active_fingers = list(hmod.PINCH_FINGERS)
+    else:
+        active_fingers = list(hmod.FINGERS)
+
     cfg = SensorConfigV3(1 + n_imu)
     filters = [MadgwickAHRS(beta=args.beta) for _ in range(n_imu)]
     forces = ForceArray(schema.nforce, rate=schema.rate or 200)
@@ -734,7 +761,7 @@ def main():
     view.addItem(grid)
     has_palm = schema.nforce >= 15
     palm = make_palm(args.hand) if has_palm else None
-    hand = HandGL(view, palm)
+    hand = HandGL(view, palm, fingers=active_fingers)
     root.addWidget(view, stretch=3)
 
     # Optional camera fusion: the tracker runs its own thread and exposes the

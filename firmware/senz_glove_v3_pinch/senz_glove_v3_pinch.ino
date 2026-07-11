@@ -25,8 +25,9 @@
  *        thumb 2x2 -> C0..C3, index 2x2 -> C4..C7, middle 2x2 -> C8..C11
  *      (three fingertip pinch pads; NO palm pads -- that is the tactile build).
  *
- * Output: self-describing CSV over USB serial @ 921600. Consumable by
- * host/senz_multi_io.py (learns the schema from the banner) and
+ * Output: the SAME self-describing CSV over BOTH USB serial (@921600) and
+ * Bluetooth LE (Nordic UART Service). Consumable by host/senz_multi_io.py (USB,
+ * learns the schema from the banner), host/senz_ble_io.py (BLE, same parser), and
  * host/force_pipeline.py (turns forceN into relative grip); host/pinch.py turns
  * the fingertip pads + posed hand into pinch features.
  *
@@ -34,8 +35,16 @@
  *   # columns: t_us,bno_qw,bno_qx,bno_qy,bno_qz,imu0_ax,...,imu7_gz,force0..force11
  *   <data lines>   (accel = raw int16, gyro = bias-corrected int16, force = 0..4095)
  *
- * Serial commands (host -> device, newline-terminated):
- *   ?   re-emit the banner + column header + per-sensor present/dead status
+ * TRANSPORT: USB is preferred. At boot the firmware waits briefly for a USB host
+ * to open the CDC port; if one is connected it logs "USB" as primary. BLE is
+ * ALWAYS advertised too, so if USB is absent (running on a battery) a BLE central
+ * can connect and gets the identical stream. Frames go to USB at the full rate and
+ * to BLE at a decimated rate (BLE_DECIM) to fit BLE bandwidth. Both stay live, so
+ * it degrades gracefully rather than hard-switching.
+ *
+ * Commands (host -> device, newline-terminated) work over EITHER USB or the BLE
+ * RX characteristic:
+ *   ?   re-emit the banner + column header (+ USB-only per-sensor status)
  *   C   calibrate gyro bias of all present IMUs (HOLD STILL ~1s), save to flash
  *   Z   zero all gyro-bias offsets in RAM
  *   D   print ONE human-readable raw line per IMU + all taxels (bring-up debug)
@@ -44,6 +53,12 @@
 #include <Preferences.h>
 #include <SPI.h>
 #include <Wire.h>
+
+// BLE (Nordic UART Service). Built-in ESP32 Bluedroid stack -- no external lib.
+#include <BLE2902.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
 
 // ============================================================================
 // CONFIG -- see docs/PINOUT_v3_pinch.txt (single source of truth for pins)
@@ -80,6 +95,17 @@ static const uint32_t SAMPLE_HZ = 200;
 static const uint32_t FRAME_US = 1000000UL / SAMPLE_HZ;   // 5000 us
 static const uint8_t SMPLRT_DIV = 4;                      // 1kHz/(1+4)=200Hz
 static const uint32_t BNO_EVERY = 2;   // read wrist every 2nd loop -> ~100 Hz
+
+// --- BLE (Nordic UART Service) — UUIDs MUST match host/senz_io.py ---
+static const char *BLE_NAME = "senz-pinch";
+#define NUS_SERVICE_UUID "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define NUS_RX_UUID      "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"  // host -> device (write)
+#define NUS_TX_UUID      "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"  // device -> host (notify)
+// USB streams every frame; BLE streams every BLE_DECIM-th frame (200Hz/4 = 50Hz)
+// so the row rate fits BLE bandwidth. Raise to 1 for full rate if your link allows.
+static const uint8_t BLE_DECIM = 4;
+static const uint16_t BLE_CHUNK = 180;   // notify payload chunk (needs MTU >= ~185)
+static const uint32_t USB_WAIT_MS = 1200;   // wait this long at boot for a USB host
 
 // ============================================================================
 // Inline MPU-6500 / MPU-9250 SPI driver (ported from senz_glove_v2/mpu6500.h,
@@ -247,6 +273,14 @@ Preferences prefs;
 static const char *NVS_NS = "senz-v3pk";
 static const char *NVS_GYRO = "gyrobias";     // NUM_IMU * 3 int16
 
+// --- BLE state ---
+BLEServer *bleServer = nullptr;
+BLECharacteristic *bleTx = nullptr;      // notify (device -> host)
+volatile bool bleConnected = false;      // a central is connected
+volatile bool usbPrimary = false;        // a USB host opened the CDC port at boot
+
+void handleChar(char c);                 // fwd decl (shared USB + BLE command handler)
+
 // ============================================================================
 // Velostat scan (CD74HC4067)
 // ============================================================================
@@ -299,18 +333,105 @@ void calibrateGyro() {
 }
 
 // ============================================================================
+// BLE (Nordic UART Service) — advertise, notify, receive commands
+// ============================================================================
+class ServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer *s) override { bleConnected = true; }
+  void onDisconnect(BLEServer *s) override {
+    bleConnected = false;
+    s->getAdvertising()->start();       // re-advertise so a client can reconnect
+  }
+};
+
+// Host -> device writes land here; feed them into the shared command handler,
+// line-buffered so a "?\n" over BLE behaves like it does over USB.
+class RxCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *c) override {
+    // getData()/getLength() are stable across ESP32 core 2.x/3.x (unlike
+    // getValue(), whose return type changed std::string -> String).
+    uint8_t *d = c->getData();
+    size_t len = c->getLength();
+    for (size_t i = 0; i < len; i++) {
+      char ch = (char)d[i];
+      if (ch == '\n' || ch == '\r') continue;
+      handleChar(ch);
+    }
+  }
+};
+
+void bleInit() {
+  BLEDevice::init(BLE_NAME);
+  bleServer = BLEDevice::createServer();
+  bleServer->setCallbacks(new ServerCallbacks());
+  BLEService *svc = bleServer->createService(NUS_SERVICE_UUID);
+
+  bleTx = svc->createCharacteristic(NUS_TX_UUID, BLECharacteristic::PROPERTY_NOTIFY);
+  bleTx->addDescriptor(new BLE2902());   // CCCD so centrals can subscribe
+
+  BLECharacteristic *rx = svc->createCharacteristic(
+      NUS_RX_UUID,
+      BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+  rx->setCallbacks(new RxCallbacks());
+
+  svc->start();
+  BLEAdvertising *adv = BLEDevice::getAdvertising();
+  adv->addServiceUUID(NUS_SERVICE_UUID);
+  adv->setScanResponse(true);
+  BLEDevice::startAdvertising();
+}
+
+// Notify a buffer over BLE in <=BLE_CHUNK pieces (the host reassembles by '\n').
+void bleNotify(const char *buf, size_t len) {
+  if (!bleConnected || bleTx == nullptr) return;
+  size_t off = 0;
+  while (off < len) {
+    size_t n = len - off;
+    if (n > BLE_CHUNK) n = BLE_CHUNK;
+    bleTx->setValue((uint8_t *)(buf + off), n);
+    bleTx->notify();
+    off += n;
+    delay(0);   // yield so the BLE stack can flush
+  }
+}
+
+// Meta lines (banner / column header) go to USB always and BLE always.
+void outMeta(const char *buf, size_t len) {
+  Serial.write((const uint8_t *)buf, len);
+  bleNotify(buf, len);
+}
+
+// Data rows: USB every frame, BLE decimated (BLE_DECIM) to fit bandwidth.
+void outData(const char *buf, size_t len) {
+  Serial.write((const uint8_t *)buf, len);
+  if ((frameCount % BLE_DECIM) == 0) bleNotify(buf, len);
+}
+
+// ============================================================================
 // Banner / output
 // ============================================================================
 void printBanner() {
-  Serial.printf("# senz-v3pinch nimu=%u nforce=%u rate=%lu\n",
-                NUM_IMU, NUM_FORCE, (unsigned long)SAMPLE_HZ);
-  Serial.print("# columns: t_us,bno_qw,bno_qx,bno_qy,bno_qz");
+  char buf[640];
+  int n;
+
+  // Machine-readable banner + column header -> USB AND BLE (host parses these).
+  n = snprintf(buf, sizeof(buf), "# senz-v3pinch nimu=%u nforce=%u rate=%lu\n",
+               NUM_IMU, NUM_FORCE, (unsigned long)SAMPLE_HZ);
+  outMeta(buf, n);
+
+  n = snprintf(buf, sizeof(buf), "# columns: t_us,bno_qw,bno_qx,bno_qy,bno_qz");
   for (uint8_t i = 0; i < NUM_IMU; i++)
-    Serial.printf(",imu%u_ax,imu%u_ay,imu%u_az,imu%u_gx,imu%u_gy,imu%u_gz",
+    n += snprintf(buf + n, sizeof(buf) - n,
+                  ",imu%u_ax,imu%u_ay,imu%u_az,imu%u_gx,imu%u_gy,imu%u_gz",
                   i, i, i, i, i, i);
-  for (uint8_t m = 0; m < NUM_FORCE; m++) Serial.printf(",force%u", m);
-  Serial.println();
-  // human-readable status (comment lines, ignored by the parser)
+  for (uint8_t m = 0; m < NUM_FORCE; m++)
+    n += snprintf(buf + n, sizeof(buf) - n, ",force%u", m);
+  n += snprintf(buf + n, sizeof(buf) - n, "\n");
+  outMeta(buf, n);
+
+  // Human-readable status (comment lines, ignored by the parser) -- USB only.
+  Serial.printf("# transport: primary=%s  BLE=%s (name '%s')\n",
+                usbPrimary ? "USB" : "BLE",
+                bleConnected ? "connected" : "advertising", BLE_NAME);
   Serial.printf("# BNO055 wrist: %s\n", bnoPresent ? "OK" : "MISSING");
   for (uint8_t i = 0; i < NUM_IMU; i++)
     Serial.printf("# IMU %u %-9s CS=GPIO%d expect=0x%02X : %s\n", i, IMU_LABEL[i],
@@ -331,15 +452,17 @@ void debugDump() {
   Serial.println();
 }
 
-void handleCommand() {
-  while (Serial.available()) {
-    char c = Serial.read();
-    if (c == '?') printBanner();
-    else if (c == 'C' || c == 'c') calibrateGyro();
-    else if (c == 'Z' || c == 'z') { memset(gyroBias, 0, sizeof(gyroBias));
-                                     Serial.println("# gyro bias zeroed (RAM)"); }
-    else if (c == 'D' || c == 'd') debugDump();
-  }
+// Shared command handler: one char, from EITHER USB serial or the BLE RX char.
+void handleChar(char c) {
+  if (c == '?') printBanner();
+  else if (c == 'C' || c == 'c') calibrateGyro();
+  else if (c == 'Z' || c == 'z') { memset(gyroBias, 0, sizeof(gyroBias));
+                                   Serial.println("# gyro bias zeroed (RAM)"); }
+  else if (c == 'D' || c == 'd') debugDump();
+}
+
+void handleCommand() {   // poll USB serial (BLE RX is delivered via RxCallbacks)
+  while (Serial.available()) handleChar(Serial.read());
 }
 
 // ============================================================================
@@ -347,7 +470,16 @@ void handleCommand() {
 // ============================================================================
 void setup() {
   Serial.begin(921600);
+
+  // USB FIRST: wait briefly for a host to open the CDC port. On the ESP32-S3
+  // native USB, `Serial` is truthy once the host asserts DTR. If a USB host is
+  // present we mark it primary; either way BLE is brought up as a fallback.
+  uint32_t t0 = millis();
+  while (!Serial && (millis() - t0) < USB_WAIT_MS) delay(10);
+  usbPrimary = (bool)Serial;
   delay(300);
+
+  bleInit();   // always advertise BLE so battery/untethered use just works
 
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(400000);
@@ -405,13 +537,18 @@ void loop() {
   // 3) velostat taxels
   scanForce();
 
-  // 4) emit CSV row
-  Serial.printf("%lu,%.4f,%.4f,%.4f,%.4f", (unsigned long)now, bqw, bqx, bqy, bqz);
+  // 4) build the CSV row into one buffer, then emit to USB (every frame) + BLE
+  //    (decimated). Building once avoids many small writes and lets BLE reuse it.
+  char row[512];
+  int n = snprintf(row, sizeof(row), "%lu,%.4f,%.4f,%.4f,%.4f",
+                   (unsigned long)now, bqw, bqx, bqy, bqz);
   for (uint8_t i = 0; i < NUM_IMU; i++)
-    Serial.printf(",%d,%d,%d,%d,%d,%d", a[i][0], a[i][1], a[i][2],
-                  g[i][0], g[i][1], g[i][2]);
-  for (uint8_t m = 0; m < NUM_FORCE; m++) Serial.printf(",%u", force[m]);
-  Serial.println();
+    n += snprintf(row + n, sizeof(row) - n, ",%d,%d,%d,%d,%d,%d",
+                  a[i][0], a[i][1], a[i][2], g[i][0], g[i][1], g[i][2]);
+  for (uint8_t m = 0; m < NUM_FORCE; m++)
+    n += snprintf(row + n, sizeof(row) - n, ",%u", force[m]);
+  n += snprintf(row + n, sizeof(row) - n, "\n");
+  outData(row, n);
 
   frameCount++;
 }

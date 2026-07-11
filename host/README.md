@@ -211,13 +211,25 @@ wiring `docs/PINOUT_v3_pinch.txt`.
 Because the visualizer is schema-driven it serves this build directly, and the
 finger IMUs **articulate the 21-landmark fingers** (the tactile build's fingers
 stay open; the proto/pinch build's fingers curl from their own IMUs). Camera fusion
-still overrides the fingers when `--camera` is given.
+still overrides the fingers when `--camera` is given. The **ring + pinky are omitted
+everywhere** for this build — the 3D hand and the camera overlay draw only
+thumb/index/middle (auto for `--sim pinch` or a `senz-v3pinch` banner; force it with
+`--fingers thumb,index,middle`).
 
 ```
 python senz_v3_qt.py --simulate --sim pinch --hand right   # pinch sim (no hardware)
-python senz_v3_qt.py --port COM5 --hand right               # wired pinch glove @ 921600
+python senz_v3_qt.py --port COM5 --hand right               # wired pinch glove (USB @ 921600)
+python senz_v3_qt.py --ble senz-pinch --hand right          # same glove over Bluetooth LE
 python senz_v3_pinch_sim.py                                  # sim alone: print a few frames
 ```
+
+**Connection: USB + Bluetooth.** The firmware streams the *same* self-describing
+CSV over both USB serial and **Bluetooth LE** (Nordic UART Service). It prefers USB
+(if a host has the port open at boot it logs USB as primary) but always advertises
+BLE, so on a battery a BLE central gets the identical stream — USB full-rate, BLE
+decimated (`BLE_DECIM`, default 50 Hz) to fit the link. Host side: `--ble <name>`
+on the visualizer / recorder, or pick a mode in the **hub** (USB / Bluetooth /
+Simulate, with a **Scan BLE** button). Needs `bleak` (`pip install bleak`).
 
 **Pinch features** (`pinch.py`, pure numpy) turn the two live signals into the
 ML-relevant readout the visualizer shows and the recorder can log:
@@ -302,8 +314,13 @@ free. Palm taxels capture power/enclosing grasps the fingertips miss.
 - `live_hand_viz.py` — legacy matplotlib viz (CPU fallback).
 - `senz_io.py` — shared serial / BLE / simulate sources + quaternion math for
   the viz. Single-hand quaternion stream; BLE device name `senz-glove`.
-- `senz_multi_io.py` — self-describing CSV I/O for the multi-IMU firmware
-  (learns the column schema from the device banner at runtime).
+- `senz_multi_io.py` — self-describing CSV I/O for the multi-IMU firmware over USB
+  serial (learns the column schema + firmware id from the device banner at runtime).
+- **`senz_ble_io.py`** — the Bluetooth LE counterpart: connects over the Nordic UART
+  Service (`bleak`), reassembles notifications into the same self-describing stream,
+  and hands out frames with the identical `.schema`/`read()`/`send()`/`close()`
+  interface. `scan_ble()` lists nearby devices. Used by `--ble` on the visualizer /
+  recorder / hub. Pure `StreamAssembler` core is headless-testable.
 - `senz_parser.py` — v2 binary-frame reader (180-byte frame, daemon thread +
   freshest-frame queue). Serial + `--simulate`.
 - `senz_visualizer.py` — v2 VPython hand skeleton, one bone per IMU (rendering +
