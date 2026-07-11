@@ -170,15 +170,26 @@ banner, and light/dark themes with a **toggle button per overlay/panel**. When t
 framing is good, **Copy recorder command** hands off to `dataset_recorder.py`.
 
 ```
-python camera_setup.py                    # default USB / built-in webcam (index 0)
-python camera_setup.py --source 1          # another USB camera index (or use Scan)
+python camera_setup.py                    # cameras from the saved config (default index 0)
+python camera_setup.py --source 1          # a single USB camera index (or use Scan)
+python camera_setup.py --sources 0,1       # TWO cameras at once (grid)
 python camera_setup.py --source http://<phone-ip>:port/video   # phone IP camera
-python camera_setup.py --width 1280 --height 720 --fps 60       # request resolution/fps
 python camera_setup.py --demo               # no webcam/mediapipe (synthetic feed)
 ```
 
-- **USB / built-in cameras** are just an index (`0`, `1`, `2`...). Click **Scan** in the UI
-  to probe which indices work. (Windows uses the DirectShow backend for reliability.)
+- **Scan + multi-camera**: **Scan USB / video devices** enumerates every connected camera
+  (by **name** where possible — `pip install pygrabber` for names on Windows, else
+  "Camera 0/1/..."). **Check one or several** and **Connect selected** to open them all at
+  once in a **grid**; click a view to focus its detailed metrics/warnings. Add a phone URL
+  with the **Add** field.
+- **Optimization** (the capture-cost levers): **Resolution**, **FPS**, **Format**, and
+  **Detect scale**. **Format = MJPG** is compressed, so a UVC camera sends far fewer bytes
+  over USB — this is the lever that lets **several USB cameras share one bus** (raw YUY2
+  saturates it). **Detect scale** feeds MediaPipe a downscaled frame to save CPU (landmarks
+  are normalized, so the overlay still lands on the full-res image). **Apply (reconnect)**
+  re-opens the cameras with the new settings.
+- **USB / built-in cameras** are just an index (`0`, `1`, `2`...). (Windows uses the
+  DirectShow backend for reliability.)
 - **Phone cameras**: virtual-webcam apps (Iriun/Camo/EpocCam/DroidCam-connect) appear as an
   index — use Scan. HTTP-stream apps (IP Webcam `:8080/video`, DroidCam Wi-Fi `:4747/video`)
   use the URL; open it in a browser first to confirm it plays, same Wi-Fi as the PC.

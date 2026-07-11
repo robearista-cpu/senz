@@ -11,10 +11,18 @@ light the rig well and repeatably.
 
 It matches senz_v3_qt.py's **light/dark themes** and uses a **toggle button per
 overlay/panel**. When the framing is good, **Copy recorder command** hands off to
-dataset_recorder.py with the chosen source.
+dataset_recorder.py with the focused source.
 
-    python camera_setup.py                       # default webcam (index 0)
-    python camera_setup.py --source 1            # another camera index
+**Scan + multiple cameras**: press *Scan* to enumerate every connected video device
+(by name where possible), check one OR several, and *Connect selected* to open them
+all at once in a grid — click a view to focus its detailed metrics/warnings.
+**Optimization** controls the capture cost: resolution, fps, pixel format (MJPG =
+low USB bandwidth, the lever for running several USB cameras on one bus), and a
+detection downscale (feed MediaPipe a smaller frame to save CPU).
+
+    python camera_setup.py                       # cameras from the saved config (default 0)
+    python camera_setup.py --source 1            # a single camera index
+    python camera_setup.py --sources 0,1         # two cameras at once
     python camera_setup.py --source http://phone-ip:port/video   # phone IP camera
     python camera_setup.py --demo                # no webcam/mediapipe (synthetic)
 
@@ -78,18 +86,54 @@ FILTERS = [("Auto-contrast", "auto_contrast"), ("Brighten", "brighten"),
            ("Sharpen", "sharpen")]
 DEFAULT_FILTERS = {k: False for _, k in FILTERS}
 
+# Capture optimization choices (the levers that matter for USB bandwidth + CPU).
+RESOLUTIONS = ["default", "320x240", "640x480", "960x540", "1280x720", "1920x1080"]
+FPS_CHOICES = ["default", "15", "30", "60"]
+# Pixel format: MJPG is compressed -> a UVC camera sends far fewer bytes over USB,
+# which is what lets several USB cameras share one bus (raw YUY2 saturates it).
+FOURCC_CHOICES = ["MJPG", "default", "YUY2"]
+DET_SCALE_CHOICES = ["1.0", "0.75", "0.5"]   # downscale frame fed to MediaPipe (CPU)
+
 DEFAULT_CONFIG = {
-    "source": "0",
+    "cameras": ["0"],       # active sources (indices and/or URLs) shown at once
+    "source": "0",          # manual add field default (back-compat)
     "theme": "dark",
     "expected_hand": "right",
     "label": "",
-    "width": None,
-    "height": None,
-    "fps": None,
+    "resolution": "640x480",
+    "fps": "default",
+    "fourcc": "MJPG",
+    "det_scale": "1.0",
     "thresholds": dict(DEFAULT_THRESHOLDS),
     "layers": dict(DEFAULT_LAYERS),
     "filters": dict(DEFAULT_FILTERS),
 }
+
+
+def parse_resolution(s):
+    """'640x480' -> (640, 480); 'default'/'' -> (None, None)."""
+    try:
+        w, h = str(s).lower().split("x")
+        return int(w), int(h)
+    except (ValueError, AttributeError):
+        return None, None
+
+
+def capture_kwargs(cfg):
+    """HandTracker capture options derived from the optimization settings."""
+    w, h = parse_resolution(cfg.get("resolution", "default"))
+    fps = cfg.get("fps", "default")
+    fourcc = cfg.get("fourcc", "default")
+    try:
+        det_scale = float(cfg.get("det_scale", "1.0"))
+    except (ValueError, TypeError):
+        det_scale = 1.0
+    return {
+        "width": w, "height": h,
+        "req_fps": int(fps) if str(fps).isdigit() else None,
+        "fourcc": fourcc if fourcc not in ("default", "", None) else None,
+        "det_scale": det_scale,
+    }
 
 
 # ----------------------------------------------------------------------------
@@ -258,9 +302,14 @@ def load_config(path):
     if path and os.path.exists(path):
         with open(path) as fh:
             data = json.load(fh)
-        for k in ("source", "theme", "expected_hand", "label", "width", "height", "fps"):
+        for k in ("cameras", "source", "theme", "expected_hand", "label",
+                  "resolution", "fps", "fourcc", "det_scale"):
             if k in data:
                 cfg[k] = data[k]
+        if "cameras" not in data and "source" in data:   # migrate old single-source
+            cfg["cameras"] = [str(data["source"])]
+        if not cfg.get("cameras"):
+            cfg["cameras"] = ["0"]
         cfg["thresholds"].update(data.get("thresholds", {}))
         cfg["layers"].update(data.get("layers", {}))
         cfg["filters"].update(data.get("filters", {}))
@@ -438,22 +487,56 @@ class SetupPanel:
         self.theme_btn.clicked.connect(self._toggle_theme)
         lay.addWidget(self.theme_btn)
 
-        # Camera source.
-        lay.addWidget(QtWidgets.QLabel("<b>Camera source</b> (index or URL)"))
-        srow = QtWidgets.QHBoxLayout()
-        self.source_edit = QtWidgets.QLineEdit(str(cfg["source"]))
-        self.connect_btn = QtWidgets.QPushButton("Connect")
-        self.connect_btn.clicked.connect(
-            lambda: self.cb["connect"](self.source_edit.text().strip()))
-        self.scan_btn = QtWidgets.QPushButton("Scan")
-        self.scan_btn.setToolTip("Probe camera indices 0-5 for USB / built-in cameras")
+        # --- Cameras: scan -> pick one OR many -> connect ---
+        lay.addWidget(QtWidgets.QLabel("<b>Cameras</b> (scan, check one or more)"))
+        self.scan_btn = QtWidgets.QPushButton("Scan USB / video devices")
+        self.scan_btn.setToolTip("Plug in a camera, then Scan to list all video "
+                                 "devices; check the ones you want to use")
         self.scan_btn.clicked.connect(self.cb["scan"])
-        srow.addWidget(self.source_edit)
-        srow.addWidget(self.connect_btn)
-        srow.addWidget(self.scan_btn)
-        lay.addLayout(srow)
+        lay.addWidget(self.scan_btn)
+        self.device_list = QtWidgets.QListWidget()
+        self.device_list.setFixedHeight(104)
+        lay.addWidget(self.device_list)
+        arow = QtWidgets.QHBoxLayout()
+        self.source_edit = QtWidgets.QLineEdit(str(cfg.get("source", "")))
+        self.source_edit.setPlaceholderText("index (0,1) or phone http URL")
+        add_btn = QtWidgets.QPushButton("Add")
+        add_btn.setToolTip("Add a manual index / phone URL to the list")
+        add_btn.clicked.connect(
+            lambda: self.cb["add_source"](self.source_edit.text().strip()))
+        arow.addWidget(self.source_edit)
+        arow.addWidget(add_btn)
+        lay.addLayout(arow)
+        self.connect_btn = QtWidgets.QPushButton("Connect selected")
+        self.connect_btn.clicked.connect(self.cb["connect_selected"])
+        lay.addWidget(self.connect_btn)
+
+        # --- Optimization (USB bandwidth + CPU levers) ---
+        lay.addWidget(QtWidgets.QLabel("<b>Optimization</b>"))
+        oform = QtWidgets.QFormLayout()
+        self.res_box = QtWidgets.QComboBox()
+        self.res_box.addItems(RESOLUTIONS)
+        self.res_box.setCurrentText(str(cfg.get("resolution", "640x480")))
+        self.fps_box = QtWidgets.QComboBox()
+        self.fps_box.addItems(FPS_CHOICES)
+        self.fps_box.setCurrentText(str(cfg.get("fps", "default")))
+        self.fourcc_box = QtWidgets.QComboBox()
+        self.fourcc_box.addItems(FOURCC_CHOICES)
+        self.fourcc_box.setCurrentText(str(cfg.get("fourcc", "MJPG")))
+        self.detscale_box = QtWidgets.QComboBox()
+        self.detscale_box.addItems(DET_SCALE_CHOICES)
+        self.detscale_box.setCurrentText(str(cfg.get("det_scale", "1.0")))
+        oform.addRow("Resolution:", self.res_box)
+        oform.addRow("FPS:", self.fps_box)
+        oform.addRow("Format:", self.fourcc_box)
+        oform.addRow("Detect scale:", self.detscale_box)
+        lay.addLayout(oform)
+        self.apply_btn = QtWidgets.QPushButton("Apply (reconnect)")
+        self.apply_btn.clicked.connect(self.cb["apply_opt"])
+        lay.addWidget(self.apply_btn)
         lay.addWidget(QtWidgets.QLabel(
-            "<i>USB / built-in: a number (0,1,2). Phone: an http URL.</i>"))
+            "<i>MJPG format = low USB bandwidth (best for several cameras at once). "
+            "Lower resolution / detect scale = less CPU.</i>"))
 
         hrow = QtWidgets.QHBoxLayout()
         hrow.addWidget(QtWidgets.QLabel("Expected hand:"))
@@ -593,10 +676,178 @@ class SetupPanel:
     def set_command(self, cmd):
         self.cmd_edit.setText(cmd)
 
+    # --- device list (checkable) -------------------------------------------
+    def set_devices(self, devices, checked=()):
+        """Populate the checkable device list. ``devices`` is [(source, label)];
+        ``checked`` is the set of sources to pre-tick (already-open cameras)."""
+        from pyqtgraph.Qt import QtCore
+        self.device_list.clear()
+        checked = set(str(c) for c in checked)
+        for source, label in devices:
+            item = self._QtWidgets.QListWidgetItem(label)
+            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+            item.setCheckState(QtCore.Qt.Checked if str(source) in checked
+                               else QtCore.Qt.Unchecked)
+            item.setData(QtCore.Qt.UserRole, str(source))
+            self.device_list.addItem(item)
+
+    def add_device(self, source, label, check=True):
+        """Append one device (e.g. a manual URL) if not already listed."""
+        from pyqtgraph.Qt import QtCore
+        for i in range(self.device_list.count()):
+            if self.device_list.item(i).data(QtCore.Qt.UserRole) == str(source):
+                return
+        item = self._QtWidgets.QListWidgetItem(label)
+        item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+        item.setCheckState(QtCore.Qt.Checked if check else QtCore.Qt.Unchecked)
+        item.setData(QtCore.Qt.UserRole, str(source))
+        self.device_list.addItem(item)
+
+    def checked_sources(self):
+        from pyqtgraph.Qt import QtCore
+        out = []
+        for i in range(self.device_list.count()):
+            it = self.device_list.item(i)
+            if it.checkState() == QtCore.Qt.Checked:
+                out.append(it.data(QtCore.Qt.UserRole))
+        return out
+
+    def opt_values(self):
+        return {"resolution": self.res_box.currentText(),
+                "fps": self.fps_box.currentText(),
+                "fourcc": self.fourcc_box.currentText(),
+                "det_scale": self.detscale_box.currentText()}
+
+
+# ----------------------------------------------------------------------------
+# One camera: a titled video panel + its own tracker + per-camera state. Several
+# of these run at once in the grid; each keeps its own fps / readiness / metrics.
+# ----------------------------------------------------------------------------
+class CameraView:
+    _BADGE = {"green": "#3caa5a", "amber": "#dca03c", "red": "#d24646"}
+
+    def __init__(self, source, name, theme_bg, fingers, on_focus=None):
+        from pyqtgraph.Qt import QtCore, QtWidgets
+
+        self.source = str(source)
+        self.name = name
+        self.on_focus = on_focus
+        self.focused = False
+        self.panel = VideoPanel(theme_bg, fingers=fingers)
+        self.panel.label.setMinimumSize(320, 240)
+        self.title = QtWidgets.QLabel(name)
+        self.title.setAlignment(QtCore.Qt.AlignCenter)
+        box = QtWidgets.QVBoxLayout()
+        box.setContentsMargins(3, 3, 3, 3)
+        box.addWidget(self.title)
+        box.addWidget(self.panel.widget, stretch=1)
+        self.widget = QtWidgets.QFrame()
+        self.widget.setLayout(box)
+        self.panel.label.mousePressEvent = lambda e: (self.on_focus and self.on_focus(self))
+
+        self.tracker = None
+        self.demo = False
+        self.handed = "?"
+        self.metrics = None
+        self.readiness = "red"
+        self.warnings = []
+        self.state = {"prev_lms": None, "fps": 0.0, "tlast": None,
+                      "last_tcap": None, "occluded": False}
+        self.set_focused(False)
+
+    def set_focused(self, on):
+        self.focused = on
+        border = "#4a90d9" if on else "#555"
+        self.widget.setStyleSheet(f"QFrame {{ border: {2 if on else 1}px solid {border}; "
+                                  "border-radius: 4px; }")
+
+    def open(self, cfg, demo=False):
+        self.close()
+        self.demo = demo
+        if demo:
+            self.tracker = SyntheticCamera().start()
+            return
+        from camera_tracker import HandTracker
+        cam = int(self.source) if self.source.isdigit() else self.source
+        self.tracker = HandTracker(camera=cam, keep_frame=True, show=False,
+                                   filters=cfg["filters"],
+                                   **capture_kwargs(cfg)).start()
+
+    def close(self):
+        if self.tracker is not None:
+            try:
+                self.tracker.stop()
+            except Exception:
+                pass
+            self.tracker = None
+
+    def set_filters(self, filters):
+        if self.tracker is not None and hasattr(self.tracker, "set_filters"):
+            self.tracker.set_filters(filters)
+
+    def poll(self, cfg):
+        """Pull the latest frame; on a NEW frame render + compute metrics/assess."""
+        if self.tracker is None:
+            return
+        got = self.tracker.get_frame()
+        if got is None:
+            self.readiness = "red"
+            err = (self.tracker.get_error() if hasattr(self.tracker, "get_error") else None)
+            self.warnings = [{"id": "nostream", "severity": "error",
+                              "text": "No camera stream",
+                              "hint": err or "check the source / phone app / model download"}]
+            self._badge()
+            return
+        if got[4] == self.state["last_tcap"]:
+            return
+        now = time.time()
+        if self.state["tlast"] is not None:
+            inst = 1.0 / max(1e-6, got[4] - self.state["tlast"])
+            self.state["fps"] += 0.25 * (inst - self.state["fps"])
+        self.state["tlast"] = got[4]
+        self.state["last_tcap"] = got[4]
+        frame, lms, score, present, t_cap, handed = got
+        latency = max(0.0, (now - t_cap) * 1e3)
+        m = compute_metrics(frame, lms, present, det_conf=score, handed=handed,
+                            prev_landmarks=self.state["prev_lms"], fps=self.state["fps"],
+                            latency_ms=latency)
+        self.state["prev_lms"] = lms
+        res = assess(m, cfg["thresholds"], cfg.get("expected_hand"))
+        self.state["occluded"] = any(x["id"] == "occl" for x in res["warnings"])
+        self.panel.update_view(frame, lms, cfg["layers"], occluded=self.state["occluded"])
+        self.metrics, self.readiness, self.warnings, self.handed = (
+            m, res["readiness"], res["warnings"], handed)
+        self._badge()
+
+    def _badge(self):
+        color = self._BADGE.get(self.readiness, "#d24646")
+        self.title.setText(f"{self.name}  ·  {self.state['fps']:4.1f} fps")
+        self.title.setStyleSheet(f"color: white; background-color: {color}; "
+                                 "border-radius: 3px; padding: 2px;")
+
+    def metrics_text(self):
+        m = self.metrics
+        if not m:
+            return "(waiting for frames)"
+        return (f"fps        {m['fps']:5.1f}\n"
+                f"latency    {m['latency_ms']:5.0f} ms\n"
+                f"brightness {m['brightness']:.2f}\n"
+                f"sharpness  {m['sharpness']:6.0f}\n"
+                f"det conf   {m['det_conf']:.2f}  ({self.handed})\n"
+                f"hand size  {m['hand_size']:.2f}\n"
+                f"velocity   {m['velocity']:.3f}")
+
+
+def _device_label(source):
+    s = str(source)
+    return f"Camera {s}" if s.isdigit() else s
+
 
 def main():
     ap = argparse.ArgumentParser(description="senz camera setup & alignment UI")
-    ap.add_argument("--source", default=None, help="camera index or URL (phone cam)")
+    ap.add_argument("--source", default=None, help="a camera index or URL (phone cam)")
+    ap.add_argument("--sources", default=None,
+                    help="comma list of cameras to open at once, e.g. 0,1 or 0,http://...")
     ap.add_argument("--demo", action="store_true", help="synthetic feed, no webcam")
     ap.add_argument("--config", default="camera_setup.json", help="settings file")
     ap.add_argument("--label", default=None, help="preset session label")
@@ -612,47 +863,116 @@ def main():
     from senz_v3_qt import THEMES
 
     cfg = load_config(args.config)
-    if args.source is not None:
-        cfg["source"] = args.source
+    if args.sources:
+        cfg["cameras"] = [s.strip() for s in args.sources.split(",") if s.strip()]
+    elif args.source is not None:
+        cfg["cameras"] = [args.source]
     if args.label is not None:
         cfg["label"] = args.label
-    for k in ("width", "height", "fps"):
-        if getattr(args, k) is not None:
-            cfg[k] = getattr(args, k)
+    if args.width and args.height:
+        cfg["resolution"] = f"{args.width}x{args.height}"
+    if args.fps is not None:
+        cfg["fps"] = str(args.fps)
+
+    active_fingers = hmod.parse_fingers(args.fingers) if args.fingers else None
 
     app = QtWidgets.QApplication(sys.argv)
     win = QtWidgets.QWidget()
     win.setObjectName("camsetup")
     win.setWindowTitle("senz camera setup")
-    win.resize(1120, 700)
+    win.resize(1200, 740)
     root = QtWidgets.QHBoxLayout(win)
 
-    state = {"source": None, "prev_lms": None, "tlast": None, "fps": 0.0,
-             "theme": cfg["theme"], "occluded": False}
+    # Left: a scrollable grid of camera views (one per open camera, wraps at 2 cols).
+    grid_host = QtWidgets.QWidget()
+    grid = QtWidgets.QGridLayout(grid_host)
+    scroll = QtWidgets.QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setWidget(grid_host)
+    root.addWidget(scroll, stretch=3)
 
-    def open_source(src):
-        if state["source"] is not None:
-            try:
-                state["source"].stop()
-            except Exception:
-                pass
-        if args.demo:
-            state["source"] = SyntheticCamera().start()
+    views = {}                 # source(str) -> CameraView
+    focused = {"view": None}
+
+    def focus(view):
+        focused["view"] = view
+        for v in views.values():
+            v.set_focused(v is view)
+
+    def relayout():
+        while grid.count():
+            grid.takeAt(0).widget().setParent(None)
+        for i, v in enumerate(views.values()):
+            grid.addWidget(v.widget, i // 2, i % 2)
+
+    def ensure_focus():
+        if focused["view"] not in views.values():
+            focus(next(iter(views.values())) if views else None)
+
+    def open_view(source, demo=False):
+        source = str(source)
+        if source in views:
             return
-        from camera_tracker import HandTracker
-        state["source"] = HandTracker(
-            camera=src, keep_frame=True, show=False,
-            width=cfg.get("width"), height=cfg.get("height"), req_fps=cfg.get("fps"),
-            filters=cfg["filters"]).start()
+        v = CameraView(source, _device_label(source), THEMES[cfg["theme"]]["gl_bg"],
+                       active_fingers, on_focus=focus)
+        views[source] = v
+        try:
+            v.open(cfg, demo=demo)
+        except Exception as e:
+            panel.status.setText(f"open failed {source}: {e}")
 
-    active_fingers = hmod.parse_fingers(args.fingers) if args.fingers else None
-    video = VideoPanel(THEMES[cfg["theme"]]["gl_bg"], fingers=active_fingers)
-    root.addWidget(video.widget, stretch=3)
+    def remove_view(source):
+        v = views.pop(source, None)
+        if v is not None:
+            v.close()
+            v.widget.setParent(None)
 
-    def on_connect(src):
-        cfg["source"] = src
-        open_source(src)
-        panel.status.setText(f"connected: {src}")
+    # --- callbacks ---
+    def on_scan():
+        panel.status.setText("scanning video devices...")
+        QtWidgets.QApplication.processEvents()
+        from camera_tracker import list_video_devices
+        devs = list_video_devices()
+        items = [(str(i), f"{name}  (index {i})") for i, name in devs]
+        listed = {s for s, _ in items}
+        for s in list(views) + list(cfg.get("cameras", [])):   # keep URLs / open cams
+            if str(s) not in listed:
+                items.append((str(s), _device_label(s)))
+                listed.add(str(s))
+        panel.set_devices(items, checked=list(views) or cfg.get("cameras", []))
+        panel.status.setText(f"found {len(devs)} camera(s); check the ones to use")
+
+    def on_add_source(src):
+        if not src:
+            return
+        panel.add_device(src, _device_label(src), check=True)
+        panel.status.setText(f"added {src!r} — press 'Connect selected'")
+
+    def on_connect_selected():
+        sel = [str(s) for s in panel.checked_sources()]
+        if not sel:
+            panel.status.setText("no cameras checked")
+            return
+        for s in list(views):          # close the ones now unchecked
+            if s not in sel:
+                remove_view(s)
+        for s in sel:                  # open the newly checked
+            open_view(s)
+        cfg["cameras"] = sel
+        relayout()
+        ensure_focus()
+        panel.status.setText("connected: " + ", ".join(sel))
+
+    def on_apply_opt():
+        cfg.update(panel.opt_values())
+        for v in views.values():       # reopen each with the new capture settings
+            v.open(cfg, demo=v.demo)
+        panel.status.setText("optimization applied — cameras reconnected")
+
+    def on_filter(key, on):
+        cfg["filters"][key] = on
+        for v in views.values():
+            v.set_filters(cfg["filters"])   # live, no reconnect
 
     def on_layer(key, on):
         cfg["layers"][key] = on
@@ -661,40 +981,29 @@ def main():
         cfg["thresholds"][key] = v / (100.0 if key != "sharp_min" else 1.0)
 
     def on_theme(mode):
-        state["theme"] = mode
         cfg["theme"] = mode
         apply_theme(mode)
 
     def on_copy_cmd():
-        cmd = recorder_command(cfg["source"], panel.label_edit.text().strip())
+        fv = focused["view"]
+        src = fv.source if fv else (cfg.get("cameras") or ["0"])[0]
+        cmd = recorder_command(src, panel.label_edit.text().strip())
         panel.set_command(cmd)
         QtWidgets.QApplication.clipboard().setText(cmd)
-        panel.status.setText("recorder command copied to clipboard")
+        panel.status.setText(f"recorder command for {src} copied to clipboard")
 
     def on_save():
+        cfg["cameras"] = list(views) or cfg.get("cameras", [])
+        cfg.update(panel.opt_values())
         cfg["label"] = panel.label_edit.text().strip()
         cfg["expected_hand"] = panel.hand_box.currentText()
         save_config(args.config, cfg)
         panel.status.setText(f"saved -> {args.config}")
 
-    def on_filter(key, on):
-        cfg["filters"][key] = on
-        src = state["source"]
-        if src is not None and hasattr(src, "set_filters"):
-            src.set_filters(cfg["filters"])   # live, no reconnect
-
-    def on_scan():
-        panel.status.setText("scanning cameras...")
-        QtWidgets.QApplication.processEvents()
-        from camera_tracker import list_cameras
-        cams = list_cameras()
-        panel.status.setText("cameras: " + (", ".join(map(str, cams)) or "none found"))
-        if cams:
-            panel.source_edit.setText(str(cams[0]))
-
-    callbacks = {"connect": on_connect, "layer": on_layer, "threshold": on_threshold,
-                 "theme": on_theme, "copy_cmd": on_copy_cmd, "save": on_save,
-                 "filter": on_filter, "scan": on_scan,
+    callbacks = {"scan": on_scan, "add_source": on_add_source,
+                 "connect_selected": on_connect_selected, "apply_opt": on_apply_opt,
+                 "layer": on_layer, "threshold": on_threshold, "theme": on_theme,
+                 "copy_cmd": on_copy_cmd, "save": on_save, "filter": on_filter,
                  "expected_hand": lambda h: cfg.__setitem__("expected_hand", h)}
     panel = SetupPanel(cfg, callbacks)
     root.addWidget(panel.widget, stretch=1)
@@ -703,68 +1012,40 @@ def main():
         th = THEMES[mode]
         panel.widget.setStyleSheet(th["qss"])
         win.setStyleSheet(f'QWidget#camsetup {{ background-color: {th["win_bg"]}; }}')
-        video.label.setStyleSheet(f"background-color: {th['gl_bg']};")
+        grid_host.setStyleSheet(f"background-color: {th['gl_bg']};")
 
     apply_theme(cfg["theme"])
-    open_source(cfg["source"])
+
+    # Initial cameras (demo = one synthetic view; else the configured list).
+    init = ["demo"] if args.demo else [str(s) for s in (cfg.get("cameras") or ["0"])]
+    panel.set_devices([(s, _device_label(s)) for s in init], checked=init)
+    for s in init:
+        open_view(s, demo=args.demo)
+    relayout()
+    ensure_focus()
 
     def tick():
-        got = state["source"].get_frame() if state["source"] else None
-        now = time.time()
-        if got is None:
-            src = state["source"]
-            err = src.get_error() if (src and hasattr(src, "get_error")) else None
-            hint = err or ("Downloading the hand model, or check the source / that the "
-                           "phone-cam app is running")
-            panel.set_readiness("red")
-            panel.set_warnings([{"id": "nostream", "severity": "error",
-                                 "text": "No camera stream", "hint": hint}],
-                               cfg["layers"].get("warnings", True))
+        for v in views.values():
+            v.poll(cfg)
+        fv = focused["view"]
+        if fv is None:
             return
-        # Only re-render on a NEW frame (t_cap changed); poll fast, work only when
-        # there's something new. fps measures the REAL camera/inference throughput.
-        if got[4] == state.get("last_tcap"):
-            return
-        if state["tlast"] is not None:
-            inst = 1.0 / max(1e-6, got[4] - state["tlast"])
-            state["fps"] += 0.25 * (inst - state["fps"])
-        state["tlast"] = got[4]
-        state["last_tcap"] = got[4]
-        frame, lms, score, present, t_cap, handed = got
-        latency = max(0.0, (now - t_cap) * 1e3)
-        m = compute_metrics(frame, lms, present, det_conf=score, handed=handed,
-                            prev_landmarks=state["prev_lms"], fps=state["fps"],
-                            latency_ms=latency)
-        state["prev_lms"] = lms
-        res = assess(m, cfg["thresholds"], cfg.get("expected_hand"))
-        state["occluded"] = any(x["id"] == "occl" for x in res["warnings"])
-        video.update_view(frame, lms, cfg["layers"], occluded=state["occluded"])
-        panel.set_readiness(res["readiness"])
-        panel.set_warnings(res["warnings"], cfg["layers"].get("warnings", True))
-        panel.set_metrics(
-            f"fps        {m['fps']:5.1f}\n"
-            f"latency    {m['latency_ms']:5.0f} ms\n"
-            f"brightness {m['brightness']:.2f}\n"
-            f"sharpness  {m['sharpness']:6.0f}\n"
-            f"det conf   {m['det_conf']:.2f}  ({handed})\n"
-            f"hand size  {m['hand_size']:.2f}\n"
-            f"velocity   {m['velocity']:.3f}",
-            cfg["layers"].get("metrics", True))
-        panel.set_command(recorder_command(cfg["source"], panel.label_edit.text().strip()))
+        show_w = cfg["layers"].get("warnings", True)
+        panel.set_readiness(fv.readiness)
+        panel.set_warnings(fv.warnings, show_w)
+        panel.set_metrics(fv.metrics_text(), cfg["layers"].get("metrics", True))
+        panel.set_command(recorder_command(fv.source, panel.label_edit.text().strip()))
 
     timer = QtCore.QTimer()
     timer.timeout.connect(tick)
-    timer.start(10)   # poll ~100 Hz; tick only re-renders on a new frame
+    timer.start(10)   # poll ~100 Hz; each view re-renders only on a new frame
 
     win.show()
     try:
         (app.exec_ if hasattr(app, "exec_") else app.exec)()
     finally:
-        if state["source"]:
-            try:
-                state["source"].stop()
-            except Exception:
-                pass
+        for v in list(views.values()):
+            v.close()
 
 
 if __name__ == "__main__":

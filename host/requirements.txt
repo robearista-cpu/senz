@@ -24,3 +24,6 @@ pandas
 # Camera tracking (camera_tracker.py, dataset_recorder.py --camera) - optional, heavy
 mediapipe
 opencv-python
+# Friendly camera device NAMES in the scan (Windows DirectShow) - optional; without
+# it the scan still works but shows "Camera 0/1/..." instead of the device name.
+pygrabber

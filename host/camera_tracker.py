@@ -184,6 +184,25 @@ def list_cameras(max_index=6):
     return found
 
 
+def list_video_devices(max_index=8):
+    """Probe cameras and return ``[(index, name)]`` for the ones that work.
+
+    Friendly device names come from pygrabber's DirectShow enumeration on Windows
+    (``pip install pygrabber``); without it (or on other OSes) the name falls back
+    to ``"Camera <index>"``. For populating a device picker so you can plug in a
+    camera, Scan, and select it by name.
+    """
+    idxs = list_cameras(max_index)
+    names = {}
+    try:                                   # best-effort friendly names (Windows)
+        from pygrabber.dshow_graph import FilterGraph
+        for i, name in enumerate(FilterGraph().get_input_devices()):
+            names[i] = name
+    except Exception:
+        pass
+    return [(i, names.get(i, f"Camera {i}")) for i in idxs]
+
+
 class HandTracker:
     """Webcam hand tracker. Runs the MediaPipe Tasks HandLandmarker on a thread.
 
@@ -194,7 +213,7 @@ class HandTracker:
 
     def __init__(self, camera=0, max_hands=1, det_conf=0.5, track_conf=0.5,
                  show=False, keep_frame=False, mirror=True, width=None,
-                 height=None, req_fps=None, filters=None):
+                 height=None, req_fps=None, filters=None, fourcc=None, det_scale=1.0):
         self.camera = _coerce_source(camera)   # int index OR URL string (phone cam)
         self.max_hands = max_hands
         self.det_conf = det_conf
@@ -205,6 +224,8 @@ class HandTracker:
         self.width = width                      # requested capture resolution / fps
         self.height = height
         self.req_fps = req_fps
+        self.fourcc = fourcc                    # e.g. "MJPG": compressed = far less USB bandwidth
+        self.det_scale = float(det_scale or 1.0)  # downscale the frame fed to MediaPipe (CPU)
         self._filters = dict(filters or {})     # live detection-aid filters {name: bool}
 
         self._latest = None
@@ -321,9 +342,20 @@ class HandTracker:
             return None
 
     def _detect(self, landmarker, rgb):
-        """Run VIDEO-mode detection with monotonically increasing ms timestamps."""
+        """Run VIDEO-mode detection with monotonically increasing ms timestamps.
+
+        When ``det_scale < 1`` the frame is downscaled JUST for detection to save
+        CPU (important with several cameras); landmarks are normalized [0,1] so
+        they still map onto the full-resolution display frame unchanged."""
         mp = self._mp
-        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        det_rgb = rgb
+        if self.det_scale < 0.999:
+            import cv2
+            h, w = rgb.shape[:2]
+            det_rgb = cv2.resize(rgb, (max(1, int(w * self.det_scale)),
+                                       max(1, int(h * self.det_scale))))
+            det_rgb = det_rgb if det_rgb.flags["C_CONTIGUOUS"] else det_rgb.copy()
+        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=det_rgb)
         ts = int((time.time() - self._t0) * 1000)
         if ts <= self._last_ts:
             ts = self._last_ts + 1
@@ -348,6 +380,11 @@ class HandTracker:
             cap = cv2.VideoCapture(self.camera, cv2.CAP_DSHOW)
         else:
             cap = cv2.VideoCapture(self.camera)
+        # Pixel format FIRST: MJPG is compressed, so a UVC camera sends far fewer
+        # bytes over USB -- the key lever for running several USB cameras at once
+        # (raw YUY2 saturates the bus). Then request resolution + fps.
+        if self.fourcc:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.fourcc))
         if self.width:
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.width))
         if self.height:
