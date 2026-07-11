@@ -30,7 +30,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 PROGRAMS = [
     ("Camera setup", "camera_setup"),
-    ("Hand visualizer", "viz"),
+    ("Hand visualizer  (diagnostic)", "viz"),
+    ("Hand studio  (final mesh hand)", "studio"),
     ("Record  (connect everything)", "record"),
 ]
 
@@ -94,8 +95,9 @@ def build_args(program, cfg):
     if program == "camera_setup":
         base = ["camera_setup.py"] + (["--source", cam] if cam else ["--demo"])
         return base + pinch_fingers
-    if program == "viz":
-        a = ["senz_v3_qt.py", "--hand", hand, "--sim", sim] + transport_args(cfg)
+    if program in ("viz", "studio"):
+        script = "senz_v3_qt.py" if program == "viz" else "senz_hand_studio.py"
+        a = [script, "--hand", hand, "--sim", sim] + transport_args(cfg)
         if fuse and cam:
             a += ["--camera", cam]
         return a
@@ -114,7 +116,7 @@ def uses_camera(program, cfg):
     cam = str(cfg.get("source", "")).strip()
     if program == "camera_setup":
         return bool(cam)                  # blank -> --demo (no real camera)
-    if program == "viz":
+    if program in ("viz", "studio"):
         return bool(cfg.get("fuse")) and bool(cam)
     if program == "record":
         return cam.isdigit()

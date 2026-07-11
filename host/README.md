@@ -262,6 +262,35 @@ articulation, force pipeline, pinch classifier) with nothing plugged in.
 
 ---
 
+## Hand studio — the final mesh hand (all data, one view)
+
+`senz_v3_qt.py` is the **diagnostic** view (sticks, spheres, per-sensor controls).
+**`senz_hand_studio.py`** is the **beauty shot**: it takes the *same* fully-fused hand
+and skins it into a solid **mesh hand** — tapered finger segments, rounded joints, a
+domed palm + forearm — and paints the **tactile data onto it**: the thumb/index/middle
+fingertips and the palm **glow with pressure** (base → hot orange → white-hot). One view
+that shows everything coming in:
+
+- **orientation** — the dorsum IMU orients the whole hand (BNO055 = forearm/wrist);
+- **articulation** — the finger IMUs curl the fingers, or `--camera` lets the camera
+  articulate them (the IMU still orients);
+- **tactile** — the velostat force pads glow on the mesh.
+
+It reuses `senz_v3_qt`'s pose + force + fusion pipeline and the 21-landmark `hand_model`,
+so it's the exact same information rendered beautifully instead of diagnostically. Same
+transports/flags, and it honors the pinch build's 3-finger set.
+
+```
+python senz_hand_studio.py --simulate --sim pinch     # no hardware
+python senz_hand_studio.py --port COM5 --camera 0      # wired glove + camera fusion
+python senz_hand_studio.py --ble senz-pinch            # over Bluetooth
+```
+
+Launch it from the **hub** ("Hand studio") too. (Rendering is pyqtgraph/OpenGL — a
+clean shaded capsule hand with force glow, not a film-grade PBR mesh.)
+
+---
+
 ## Hardware Sprint v3 prototype — native GPU visualizer
 
 The v3 prototype firmware (`firmware/senz_glove_v3_proto/`) is a trimmed build —
@@ -350,6 +379,12 @@ free. Palm taxels capture power/enclosing grasps the fingertips miss.
   `--camera <src>` **fuses** a live camera (IMU orients, camera articulates fingers).
   Schema-driven, so it serves both the **tactile** (1 IMU) and **proto** (8 IMU)
   builds. Serial + `--simulate` (`--sim tactile|proto`).
+- **`senz_hand_studio.py`** — the **"final result" mesh hand**: skins the same fused
+  pose into a solid capsule-mesh hand (tapered finger segments, rounded joints, domed
+  palm + forearm) with the **tactile force glowing** on the thumb/index/middle fingertips
+  and palm. Same transports/flags as `senz_v3_qt.py` (`--port`/`--ble`/`--simulate`/
+  `--sim`/`--camera`/`--hand`/`--fingers`); reuses its pose + force + fusion pipeline. The
+  mesh-geometry helpers are pure numpy and headless-testable.
 - `senz_v3_tactile_sim.py` — Hardware Sprint v3 **tactile** simulator: 1 dorsum IMU
   (gross rock) + BNO wrist + 15-taxel grasp-cycle force. Default for `--simulate`.
 - `senz_v3_sim.py` — v3 **proto** simulator (8 IMU): scripts a pose animation and emits
