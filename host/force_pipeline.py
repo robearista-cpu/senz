@@ -58,15 +58,21 @@ class ForceChannel:
         r = self.resistance(raw)
         grip = 1.0 / (1.0 + r / self.series_ohms)  # 0 (open) .. ->1 (hard press)
 
-        self.value += self.a_lp * (grip - self.value)
         if self.baseline is None:
-            self.baseline = self.value
-        # Baseline only tracks downward / slowly upward (so a sustained press
-        # doesn't get absorbed into the baseline immediately).
-        if self.value < self.baseline:
-            self.baseline += 0.5 * (self.value - self.baseline)  # fast release
+            # Seed BOTH the low-pass and the baseline at the first real sample.
+            # (Starting value at 0 would seed the baseline far below the true open
+            # level, producing a bogus multi-second "grip" transient on every
+            # channel while the slow baseline converged up -- a startup artifact.)
+            self.value = grip
+            self.baseline = grip
         else:
-            self.baseline += self.a_base * (self.value - self.baseline)
+            self.value += self.a_lp * (grip - self.value)
+            # Baseline only tracks downward / slowly upward (so a sustained press
+            # doesn't get absorbed into the baseline immediately).
+            if self.value < self.baseline:
+                self.baseline += 0.5 * (self.value - self.baseline)  # fast release
+            else:
+                self.baseline += self.a_base * (self.value - self.baseline)
 
         above = max(0.0, self.value - self.baseline)
         self.span = max(self.span, above)

@@ -39,6 +39,7 @@ import threading
 
 import numpy as np
 
+import hand_model as hmod
 from senz_io import quat_to_matrix
 
 # ----------------------------------------------------------------------------
@@ -121,29 +122,35 @@ THEMES = {
 }
 
 
-# Right-hand canonical geometry (wrist at origin, fingers +Y, back-of-hand +Z,
-# thumb on -X). Left hand mirrors X. bones = (imu_index, length); thumb chains
-# meta(6) -> base(4) -> tip(5).
-# Knuckle Z (+Z = back of hand) rises toward the middle = the transverse metacarpal
-# ARCH; the middle knuckle sits highest, so the hand reads as domed, not flat.
-_FINGERS_BASE = [
-    ("index",  (1.0, 0.55, 0.15), (-1.3, 2.0, 0.22), (0.0, 1.0, 0.0),
-     [(0, 1.0), (1, 0.7)]),
-    ("middle", (0.35, 0.9, 0.4),  (-0.4, 2.2, 0.45), (0.0, 1.0, 0.0),
-     [(2, 1.1), (3, 0.8)]),
-    ("thumb",  (0.9, 0.45, 0.9),   (-1.95, 0.7, 0.05), (-0.55, 0.6, 0.0),
-     [(6, 0.8), (4, 0.7), (5, 0.6)]),
-]
+# The hand is drawn as the MediaPipe 21-landmark, 5-finger skeleton (see
+# hand_model.py) so it matches the camera program and reads orientation clearly.
+# Force taxels live at the fingertip landmarks of thumb/index/middle.
+FORCE_FINGERTIP = {"thumb": 4, "index": 8, "middle": 12}
 
 
-def make_fingers(hand="right"):
-    """Finger geometry for the given hand; 'left' mirrors X (thumb side)."""
-    s = 1.0 if hand == "right" else -1.0
-    out = []
-    for name, color, (kx, ky, kz), (rx, ry, rz), bones in _FINGERS_BASE:
-        out.append(dict(name=name, color=color, knuckle=(kx * s, ky, kz),
-                        rest=(rx * s, ry, rz), bones=bones))
-    return out
+def finger_imu_map(nimu):
+    """Which sensor bends which finger joint, for builds that have finger IMUs.
+
+    Returns a list of ``(pivot_landmark, downstream_landmarks, sensor_index)`` for
+    ``hand_model.bend_fingers``. Sensor 0 = wrist; the finger IMUs are sensors 1..
+    and the dorsum (hand frame) is the LAST IMU (= nimu). Only the 8-IMU proto /
+    pinch layout carries finger IMUs; the tactile build (nimu=1, dorsum only)
+    returns [] -> the fingers render as the canonical open hand.
+
+    proto / pinch sensor order (1-based): 1 idx-prox, 2 idx-dist, 3 mid-prox,
+    4 mid-dist, 5 thmb-base, 6 thmb-tip, 7 thmb-meta (base MCP, 9-axis), 8 dorsum.
+    """
+    if nimu >= 8:
+        return [
+            (1, [2, 3, 4], 7),        # thumb CMC   <- thmb-meta (base MCP)
+            (2, [3, 4], 5),           # thumb MCP   <- thmb-base
+            (3, [4], 6),              # thumb IP    <- thmb-tip
+            (5, [6, 7, 8], 1),        # index MCP   <- idx-prox
+            (6, [7, 8], 2),           # index PIP   <- idx-dist
+            (9, [10, 11, 12], 3),     # middle MCP  <- mid-prox
+            (10, [11, 12], 4),        # middle PIP  <- mid-dist
+        ]
+    return []
 
 
 # ----------------------------------------------------------------------------
@@ -238,49 +245,46 @@ class SensorConfigV3:
         self.zinv = [None] * self.n
 
 
-def compute_skeleton(raw_quats, cfg, fingers, dorsum_sensor=DORSUM_SENSOR):
-    """Forward kinematics. Dorsum IMU = hand/palm frame; BNO055 = forearm frame.
+def compute_skeleton(raw_quats, cfg, dorsum_sensor=DORSUM_SENSOR, hand="right",
+                     world_lms=None, imu_map=None):
+    """21-landmark hand posed in 3D. Dorsum IMU = hand/palm frame orientation;
+    BNO055 = forearm frame (wrist-flex).
 
-    raw_quats: [wrist_bno, q_imu0 .. q_imu(nimu-1)]  (each (w,x,y,z)); the dorsum
-    is the LAST IMU, at sensor index `dorsum_sensor` (= nimu). Knuckles are placed
-    by the hand frame; each bone's direction comes from its own (zeroed) finger
-    IMU, so a rigid whole-hand rotation moves everything together while finger
-    curl stays independent.
-
-    GRACEFUL DEGRADATION: finger IMUs live at sensors 1..dorsum_sensor-1. If a
-    finger's IMU isn't provided by the firmware (e.g. the tactile build streams
-    only the dorsum), that bone rides rigidly with the hand frame (R_bone = R_hand,
-    a neutral rest pose) and is marked disabled so the renderer dims it -- the hand
-    still reads as a hand and follows gross movement; finger articulation comes
-    from the camera later. Returns palm/forearm frames, wrist-flex angle, and the
-    per-finger joint chains.
+    raw_quats: [wrist_bno, q_imu0 .. q_imu(nimu-1)]; the dorsum is the LAST IMU at
+    sensor index `dorsum_sensor` (= nimu). The finger SHAPE comes from the first
+    available of three sources (highest authority first):
+      - Fusion (world_lms given): the camera's live world landmarks, orientation-
+        normalized via hand_model.pose_from_world -- the CAMERA articulates fingers.
+      - Finger IMUs (imu_map non-empty, proto/pinch build): each finger's landmarks
+        bend about their joints from that finger's IMU vs the hand frame, so the
+        glove's own IMUs curl the fingers (see hand_model.bend_fingers).
+      - Canonical (tactile build, no finger IMUs): the open hand; only gross
+        orientation from the dorsum.
+    The resulting hand-local shape is rotated by R_hand and placed at the wrist.
+    Returns the forearm/hand frames, wrist-flex angle, 21 world-space `points`,
+    a `fused` flag (camera on), and a `driven` label for the readout.
     """
     R_forearm = cfg.sensor_R(0, raw_quats[0])
     R_hand = cfg.sensor_R(dorsum_sensor, raw_quats[dorsum_sensor])
     wrist_pos = np.zeros(3)
-    out = []
-    for f in fingers:
-        rest = _unit(np.array(f["rest"], dtype=float))
-        base = wrist_pos + R_hand @ np.array(f["knuckle"], dtype=float)
-        pos = base.copy()
-        joints = [base.copy()]
-        enabled = []
-        for imu, length in f["bones"]:
-            s = imu + 1
-            if s < dorsum_sensor:                     # a real, present finger IMU
-                R_bone = cfg.sensor_R(s, raw_quats[s])
-                on = cfg.enabled[s]
-            else:                                     # no finger IMU -> rest pose
-                R_bone = R_hand
-                on = False
-            pos = pos + (R_bone @ rest) * length
-            joints.append(pos.copy())
-            enabled.append(on)
-        out.append(dict(name=f["name"], color=f["color"], joints=joints,
-                        enabled=enabled))
+    if world_lms is not None:
+        local = hmod.pose_from_world(world_lms)       # camera shape, orientation-free
+        fused, driven = True, "IMU+camera"
+    elif imu_map:
+        bends = []
+        for pivot, downstream, s in imu_map:          # finger IMUs bend the fingers
+            if s < len(raw_quats) and cfg.enabled[s]:
+                R_rel = R_hand.T @ cfg.sensor_R(s, raw_quats[s])
+                bends.append((pivot, downstream, R_rel))
+        local = hmod.bend_fingers(hmod.canonical(hand), bends)
+        fused, driven = False, "IMU fingers"
+    else:
+        local = hmod.canonical(hand)                  # canonical open hand
+        fused, driven = False, "IMU gross"
+    points = wrist_pos + (R_hand @ local.T).T         # 21x3 world positions
     flex = rot_angle_deg(R_forearm.T @ R_hand)
     return dict(R_forearm=R_forearm, R_hand=R_hand, wrist_pos=wrist_pos,
-                flex_deg=flex, fingers=out)
+                flex_deg=flex, points=points, fused=fused, driven=driven)
 
 
 def force_color(t):
@@ -377,11 +381,16 @@ class ThreadedMultiReader:
 # GPU renderer (pyqtgraph OpenGL) -- imported lazily so headless import works
 # ----------------------------------------------------------------------------
 class HandGL:
-    def __init__(self, view, fingers, palm=None):
+    """Renders the MediaPipe 21-landmark, 5-finger skeleton -- the same hand the
+    camera program draws -- as GPU spheres (joints) + cylinders (bones), colored
+    per finger from ``hand_model`` so orientation reads at a glance. Force taxels
+    sit at the thumb/index/middle fingertips and on the palm surface.
+    """
+
+    def __init__(self, view, palm=None):
         import pyqtgraph.opengl as gl
 
         self.gl = gl
-        self.fingers = fingers
         self.palm_taxels = palm or []
         cyl = gl.MeshData.cylinder(rows=1, cols=16,
                                    radius=[BONE_RADIUS, BONE_RADIUS], length=1.0)
@@ -406,25 +415,27 @@ class HandGL:
                                    color=(0.7, 0.7, 0.8, 1.0), **mesh_kw)
         view.addItem(self.wrist)
 
-        self.bones, self.joints, self.force_pts = [], [], []
-        for f in fingers:
-            col = f["color"] + (1.0,)
-            fb, fj = [], []
-            for _ in f["bones"]:
-                it = gl.GLMeshItem(vertexes=self._cv, faces=self._cf, color=col,
-                                   **mesh_kw)
-                view.addItem(it)
-                fb.append(it)
-            for _ in range(len(f["bones"]) + 1):
-                jt = gl.GLMeshItem(vertexes=self._sv, faces=self._sf,
-                                   color=(0.85, 0.85, 0.9, 1.0), **mesh_kw)
-                view.addItem(jt)
-                fj.append(jt)
-            self.bones.append(fb)
-            self.joints.append(fj)
+        # One bone cylinder per HAND_CONNECTIONS edge, one sphere per landmark,
+        # each colored from the shared hand model (camera-style per-finger colors).
+        self.bones = []
+        for a, b in hmod.HAND_CONNECTIONS:
+            col = hmod.connection_color(a, b) + (1.0,)
+            it = gl.GLMeshItem(vertexes=self._cv, faces=self._cf, color=col, **mesh_kw)
+            view.addItem(it)
+            self.bones.append(it)
+        self.joints = []
+        for i in range(hmod.N_LANDMARKS):
+            col = hmod.joint_color(i) + (1.0,)
+            jt = gl.GLMeshItem(vertexes=self._sv, faces=self._sf, color=col, **mesh_kw)
+            view.addItem(jt)
+            self.joints.append(jt)
+
+        # Force patches: a 2x2 scatter at each of thumb/index/middle fingertips.
+        self.force_pts = {}
+        for name in FORCE_FINGERTIP:
             sp = gl.GLScatterPlotItem(pos=np.zeros((4, 3)), size=0.001, pxMode=False)
             view.addItem(sp)
-            self.force_pts.append(sp)
+            self.force_pts[name] = sp
 
         # Palm taxels (single scatter of N points on the palm surface).
         self.palm_scatter = None
@@ -445,22 +456,19 @@ class HandGL:
 
     def update(self, skel, fp):
         wp, Rf, Rh = skel["wrist_pos"], skel["R_forearm"], skel["R_hand"]
+        pts = skel["points"]
         v, f = build_wrist_palm(wp, Rf, Rh)
         self.palm.setMeshData(vertexes=v, faces=f)
         self.forearm.setMeshData(vertexes=self._cylinder(wp, wp + Rf @ (-_EY * FOREARM_LEN)),
                                  faces=self._cf)
         self.wrist.setMeshData(vertexes=self._sphere_at(wp, WRIST_RADIUS), faces=self._sf)
-        for fi, ff in enumerate(skel["fingers"]):
-            joints = ff["joints"]
-            base_col = self.fingers[fi]["color"]
-            for bi, it in enumerate(self.bones[fi]):
-                a = 1.0 if ff["enabled"][bi] else 0.22
-                it.setMeshData(vertexes=self._cylinder(joints[bi], joints[bi + 1]),
-                               faces=self._cf, color=base_col + (a,))
-            for ji, jt in enumerate(self.joints[fi]):
-                jt.setMeshData(vertexes=self._sphere_at(joints[ji], JOINT_RADIUS),
-                               faces=self._sf)
-            self._force_patch(fi, ff, Rh, joints[-1], fp)
+        for (a, b), it in zip(hmod.HAND_CONNECTIONS, self.bones):
+            it.setMeshData(vertexes=self._cylinder(pts[a], pts[b]), faces=self._cf)
+        for i, jt in enumerate(self.joints):
+            r = JOINT_RADIUS * (1.35 if i in hmod.FINGERTIPS else 1.0)
+            jt.setMeshData(vertexes=self._sphere_at(pts[i], r), faces=self._sf)
+        for name, tip_idx in FORCE_FINGERTIP.items():
+            self._force_patch(name, Rh, pts[tip_idx], fp)
         self._palm_patch(wp, Rh, fp)
 
     def _palm_patch(self, wp, Rh, fp):
@@ -476,8 +484,8 @@ class HandGL:
         self.palm_scatter.setData(pos=np.array(pts), color=np.array(cols),
                                   size=np.array(sizes))
 
-    def _force_patch(self, fi, ff, Rh, tip, fp):
-        base = FORCE_BASE[ff["name"]]
+    def _force_patch(self, name, Rh, tip, fp):
+        base = FORCE_BASE[name]
         ex, ez = Rh @ _EX, Rh @ _EZ
         offs = [(-0.5, -0.5), (0.5, -0.5), (-0.5, 0.5), (0.5, 0.5)]
         pts, cols, sizes = [], [], []
@@ -487,8 +495,8 @@ class HandGL:
             r, g, b = force_color(rel)
             cols.append((r, g, b, 1.0))
             sizes.append(0.16 + 0.22 * rel)
-        self.force_pts[fi].setData(pos=np.array(pts), color=np.array(cols),
-                                   size=np.array(sizes))
+        self.force_pts[name].setData(pos=np.array(pts), color=np.array(cols),
+                                     size=np.array(sizes))
 
 
 # ----------------------------------------------------------------------------
@@ -659,6 +667,7 @@ def main():
     from pyqtgraph.Qt import QtCore, QtWidgets
 
     import senz_multi_io as mio
+    import pinch as pinchmod
     from fusion.madgwick import MadgwickAHRS
     from force_pipeline import ForceArray, process_frame
 
@@ -669,17 +678,22 @@ def main():
     ap.add_argument("--beta", type=float, default=0.1, help="Madgwick gain")
     ap.add_argument("--hand", choices=["right", "left"], default="right",
                     help="hand layout (default right)")
-    ap.add_argument("--sim", choices=["tactile", "proto"], default="tactile",
-                    help="which simulator for --simulate (default tactile: "
-                         "1 dorsum IMU + 15-taxel force; proto = 8-IMU build)")
+    ap.add_argument("--sim", choices=["tactile", "proto", "pinch"], default="tactile",
+                    help="which simulator for --simulate. tactile: 1 dorsum IMU + "
+                         "15-taxel force. proto: 8-IMU + 15 taxel. pinch: 8-IMU + "
+                         "12 fingertip taxels, animates index/middle-thumb pinches")
+    ap.add_argument("--camera", metavar="SRC",
+                    help="camera source (index or URL) to FUSE: the IMU supplies "
+                         "hand orientation, the camera articulates the fingers")
     args = ap.parse_args()
-
-    fingers = make_fingers(args.hand)
 
     if args.simulate or not args.port:
         if args.sim == "proto":
             from senz_v3_sim import SimV3Source
             source = SimV3Source()
+        elif args.sim == "pinch":
+            from senz_v3_pinch_sim import SimV3PinchSource
+            source = SimV3PinchSource()
         else:
             from senz_v3_tactile_sim import SimV3TactileSource
             source = SimV3TactileSource()
@@ -695,6 +709,9 @@ def main():
         print("WARNING: firmware reports nimu=0 (banner not parsed?) -- hand pose "
               "falls back to the wrist frame; check the serial banner.")
     sensor_labels = make_sensor_labels(n_imu)
+    # Builds with finger IMUs (proto/pinch, nimu>=8) articulate the fingers from
+    # them; the tactile build (nimu=1) gets [] -> canonical open hand.
+    imu_map = finger_imu_map(n_imu)
 
     cfg = SensorConfigV3(1 + n_imu)
     filters = [MadgwickAHRS(beta=args.beta) for _ in range(n_imu)]
@@ -717,8 +734,23 @@ def main():
     view.addItem(grid)
     has_palm = schema.nforce >= 15
     palm = make_palm(args.hand) if has_palm else None
-    hand = HandGL(view, fingers, palm)
+    hand = HandGL(view, palm)
     root.addWidget(view, stretch=3)
+
+    # Optional camera fusion: the tracker runs its own thread and exposes the
+    # latest world landmarks; when present the fingers articulate from the camera
+    # while the dorsum IMU keeps supplying orientation (see compute_skeleton).
+    tracker = None
+    if args.camera:
+        try:
+            from camera_tracker import HandTracker
+            src = int(args.camera) if str(args.camera).isdigit() else args.camera
+            tracker = HandTracker(camera=src, keep_frame=False)
+            tracker.start()
+            print(f"camera fusion ON (source {args.camera!r})")
+        except Exception as e:
+            print(f"camera fusion unavailable ({e}); IMU-only")
+            tracker = None
 
     def zero_force():
         forces.__init__(schema.nforce, rate=schema.rate or 200)
@@ -763,7 +795,9 @@ def main():
                                                ax, ay, az, dt))
         state["raw_quats"] = raw_quats
 
-        skel = compute_skeleton(raw_quats, cfg, fingers, dorsum_sensor)
+        world = tracker.get_world() if tracker is not None else None
+        skel = compute_skeleton(raw_quats, cfg, dorsum_sensor, args.hand,
+                                world_lms=world, imu_map=imu_map)
         fp = process_frame(frame, forces)
         hand.update(skel, fp)
         ctrl.update_force(fp)
@@ -773,7 +807,7 @@ def main():
             state["fps"] += 0.1 * (1.0 / max(1e-6, now - state["tlast"]) - state["fps"])
         state["tlast"] = now
         lines = [f"fps ~ {state['fps']:5.1f}   dt {dt*1e3:4.1f} ms   hand={args.hand}",
-                 f"wrist flex  {skel['flex_deg']:5.1f} deg", ""]
+                 f"drive: {skel['driven']}   wrist flex {skel['flex_deg']:5.1f} deg", ""]
         for c in ("thumb", "index", "middle"):
             b = FORCE_BASE[c]
             bars = " ".join(f"{fp[b+i]['relative_grip']:.2f}" for i in range(4))
@@ -781,6 +815,12 @@ def main():
         if has_palm:
             bars = " ".join(f"{fp[c]['relative_grip']:.2f}" for c in PALM_CHANNELS)
             lines.append(f"palm   {bars}")
+        # Pinch readout (ML focus): tip gaps + pad pressure + detected state.
+        pf = pinchmod.pinch_features(skel["points"], fp)
+        lines += ["",
+                  f"pinch  idx d={pf['dist_index']:.2f} f={pf['force_index']:.2f}",
+                  f"       mid d={pf['dist_middle']:.2f} f={pf['force_middle']:.2f}",
+                  f"  -> {pf['state'].upper()}"]
         ctrl.set_info("\n".join(lines))
 
     timer = QtCore.QTimer()
@@ -792,6 +832,8 @@ def main():
         (app.exec_ if hasattr(app, "exec_") else app.exec)()
     finally:
         reader.close()
+        if tracker is not None:
+            tracker.stop()
 
 
 if __name__ == "__main__":

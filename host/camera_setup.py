@@ -32,19 +32,21 @@ import time
 import numpy as np
 
 # ----------------------------------------------------------------------------
-# Hand topology (21 MediaPipe landmarks) -- hardcoded so we don't import
-# mediapipe just for the connection constants.
+# Hand topology (21 MediaPipe landmarks) -- shared with the 3D visualizer via
+# hand_model, so both programs draw the SAME per-finger colored skeleton.
 # ----------------------------------------------------------------------------
-HAND_CONNECTIONS = [
-    (0, 1), (1, 2), (2, 3), (3, 4),          # thumb
-    (0, 5), (5, 6), (6, 7), (7, 8),          # index
-    (5, 9), (9, 10), (10, 11), (11, 12),     # middle
-    (9, 13), (13, 14), (14, 15), (15, 16),   # ring
-    (13, 17), (17, 18), (18, 19), (19, 20),  # pinky
-    (0, 17),                                 # palm base
-]
-FINGERTIPS = [4, 8, 12, 16, 20]
-N_LANDMARKS = 21
+import hand_model as hmod
+
+HAND_CONNECTIONS = hmod.HAND_CONNECTIONS
+FINGERTIPS = hmod.FINGERTIPS
+N_LANDMARKS = hmod.N_LANDMARKS
+
+
+def _qcolor(rgb, a=230):
+    """hand_model rgb (0..1) -> QColor (imported lazily so this stays headless)."""
+    from pyqtgraph.Qt import QtGui
+    r, g, b = rgb
+    return QtGui.QColor(int(r * 255), int(g * 255), int(b * 255), a)
 
 # Default quality thresholds (all tunable live). Normalized image coords [0,1].
 DEFAULT_THRESHOLDS = {
@@ -71,13 +73,22 @@ LAYERS = [
 ]
 DEFAULT_LAYERS = {k: (k not in ("grid", "mirror")) for _, k in LAYERS}
 
+# Detection-aid video filters (applied to the frame fed to MediaPipe + shown).
+FILTERS = [("Auto-contrast", "auto_contrast"), ("Brighten", "brighten"),
+           ("Sharpen", "sharpen")]
+DEFAULT_FILTERS = {k: False for _, k in FILTERS}
+
 DEFAULT_CONFIG = {
     "source": "0",
     "theme": "dark",
     "expected_hand": "right",
     "label": "",
+    "width": None,
+    "height": None,
+    "fps": None,
     "thresholds": dict(DEFAULT_THRESHOLDS),
     "layers": dict(DEFAULT_LAYERS),
+    "filters": dict(DEFAULT_FILTERS),
 }
 
 
@@ -247,11 +258,12 @@ def load_config(path):
     if path and os.path.exists(path):
         with open(path) as fh:
             data = json.load(fh)
-        for k in ("source", "theme", "expected_hand", "label"):
+        for k in ("source", "theme", "expected_hand", "label", "width", "height", "fps"):
             if k in data:
                 cfg[k] = data[k]
         cfg["thresholds"].update(data.get("thresholds", {}))
         cfg["layers"].update(data.get("layers", {}))
+        cfg["filters"].update(data.get("filters", {}))
     return cfg
 
 
@@ -385,8 +397,8 @@ class VideoPanel:
                 p.setPen(QtGui.QPen(QtGui.QColor(240, 220, 60, 200), 2))
                 p.drawRect(QtCore.QRectF(tl, br))
             if layers.get("skeleton"):
-                p.setPen(QtGui.QPen(QtGui.QColor(70, 220, 120, 230), 3))
                 for a, b in HAND_CONNECTIONS:
+                    p.setPen(QtGui.QPen(_qcolor(hmod.connection_color(a, b)), 3))
                     p.drawLine(px(landmarks[a]), px(landmarks[b]))
             if layers.get("joints"):
                 for i in range(min(N_LANDMARKS, len(landmarks))):
@@ -394,7 +406,7 @@ class VideoPanel:
                     if tip and occluded and layers.get("occlusion"):
                         col = QtGui.QColor(230, 70, 70, 240)
                     else:
-                        col = QtGui.QColor(240, 240, 255, 240)
+                        col = _qcolor(hmod.joint_color(i), a=240)
                     p.setBrush(col)
                     p.setPen(QtGui.QPen(col, 1))
                     r = 5 if tip else 3
@@ -427,9 +439,15 @@ class SetupPanel:
         self.connect_btn = QtWidgets.QPushButton("Connect")
         self.connect_btn.clicked.connect(
             lambda: self.cb["connect"](self.source_edit.text().strip()))
+        self.scan_btn = QtWidgets.QPushButton("Scan")
+        self.scan_btn.setToolTip("Probe camera indices 0-5 for USB / built-in cameras")
+        self.scan_btn.clicked.connect(self.cb["scan"])
         srow.addWidget(self.source_edit)
         srow.addWidget(self.connect_btn)
+        srow.addWidget(self.scan_btn)
         lay.addLayout(srow)
+        lay.addWidget(QtWidgets.QLabel(
+            "<i>USB / built-in: a number (0,1,2). Phone: an http URL.</i>"))
 
         hrow = QtWidgets.QHBoxLayout()
         hrow.addWidget(QtWidgets.QLabel("Expected hand:"))
@@ -459,6 +477,19 @@ class SetupPanel:
             grid.addWidget(b, i // 2, i % 2)
             self.layer_btns[key] = b
         lay.addLayout(grid)
+
+        # Detection-aid filters (help MediaPipe in poor light; not saved to data).
+        lay.addWidget(QtWidgets.QLabel("<b>Filters</b> (detection aid)"))
+        frow = QtWidgets.QHBoxLayout()
+        self.filter_btns = {}
+        for label, key in FILTERS:
+            b = QtWidgets.QPushButton(label)
+            b.setCheckable(True)
+            b.setChecked(bool(cfg["filters"].get(key, False)))
+            b.toggled.connect(lambda on, k=key: self.cb["filter"](k, on))
+            frow.addWidget(b)
+            self.filter_btns[key] = b
+        lay.addLayout(frow)
 
         # A few live threshold sliders.
         self.sliders = {}
@@ -563,6 +594,9 @@ def main():
     ap.add_argument("--demo", action="store_true", help="synthetic feed, no webcam")
     ap.add_argument("--config", default="camera_setup.json", help="settings file")
     ap.add_argument("--label", default=None, help="preset session label")
+    ap.add_argument("--width", type=int, default=None, help="requested capture width")
+    ap.add_argument("--height", type=int, default=None, help="requested capture height")
+    ap.add_argument("--fps", type=int, default=None, help="requested capture fps")
     args = ap.parse_args()
 
     from pyqtgraph.Qt import QtCore, QtWidgets
@@ -573,6 +607,9 @@ def main():
         cfg["source"] = args.source
     if args.label is not None:
         cfg["label"] = args.label
+    for k in ("width", "height", "fps"):
+        if getattr(args, k) is not None:
+            cfg[k] = getattr(args, k)
 
     app = QtWidgets.QApplication(sys.argv)
     win = QtWidgets.QWidget()
@@ -594,7 +631,10 @@ def main():
             state["source"] = SyntheticCamera().start()
             return
         from camera_tracker import HandTracker
-        state["source"] = HandTracker(camera=src, keep_frame=True, show=False).start()
+        state["source"] = HandTracker(
+            camera=src, keep_frame=True, show=False,
+            width=cfg.get("width"), height=cfg.get("height"), req_fps=cfg.get("fps"),
+            filters=cfg["filters"]).start()
 
     video = VideoPanel(THEMES[cfg["theme"]]["gl_bg"])
     root.addWidget(video.widget, stretch=3)
@@ -627,8 +667,24 @@ def main():
         save_config(args.config, cfg)
         panel.status.setText(f"saved -> {args.config}")
 
+    def on_filter(key, on):
+        cfg["filters"][key] = on
+        src = state["source"]
+        if src is not None and hasattr(src, "set_filters"):
+            src.set_filters(cfg["filters"])   # live, no reconnect
+
+    def on_scan():
+        panel.status.setText("scanning cameras...")
+        QtWidgets.QApplication.processEvents()
+        from camera_tracker import list_cameras
+        cams = list_cameras()
+        panel.status.setText("cameras: " + (", ".join(map(str, cams)) or "none found"))
+        if cams:
+            panel.source_edit.setText(str(cams[0]))
+
     callbacks = {"connect": on_connect, "layer": on_layer, "threshold": on_threshold,
                  "theme": on_theme, "copy_cmd": on_copy_cmd, "save": on_save,
+                 "filter": on_filter, "scan": on_scan,
                  "expected_hand": lambda h: cfg.__setitem__("expected_hand", h)}
     panel = SetupPanel(cfg, callbacks)
     root.addWidget(panel.widget, stretch=1)
@@ -645,17 +701,25 @@ def main():
     def tick():
         got = state["source"].get_frame() if state["source"] else None
         now = time.time()
-        if state["tlast"] is not None:
-            inst = 1.0 / max(1e-6, now - state["tlast"])
-            state["fps"] += 0.2 * (inst - state["fps"])
-        state["tlast"] = now
         if got is None:
+            src = state["source"]
+            err = src.get_error() if (src and hasattr(src, "get_error")) else None
+            hint = err or ("Downloading the hand model, or check the source / that the "
+                           "phone-cam app is running")
             panel.set_readiness("red")
             panel.set_warnings([{"id": "nostream", "severity": "error",
-                                 "text": "No camera stream", "hint":
-                                 "Check the source / that the phone cam app is running"}],
+                                 "text": "No camera stream", "hint": hint}],
                                cfg["layers"].get("warnings", True))
             return
+        # Only re-render on a NEW frame (t_cap changed); poll fast, work only when
+        # there's something new. fps measures the REAL camera/inference throughput.
+        if got[4] == state.get("last_tcap"):
+            return
+        if state["tlast"] is not None:
+            inst = 1.0 / max(1e-6, got[4] - state["tlast"])
+            state["fps"] += 0.25 * (inst - state["fps"])
+        state["tlast"] = got[4]
+        state["last_tcap"] = got[4]
         frame, lms, score, present, t_cap, handed = got
         latency = max(0.0, (now - t_cap) * 1e3)
         m = compute_metrics(frame, lms, present, det_conf=score, handed=handed,
@@ -680,7 +744,7 @@ def main():
 
     timer = QtCore.QTimer()
     timer.timeout.connect(tick)
-    timer.start(33)
+    timer.start(10)   # poll ~100 Hz; tick only re-renders on a new frame
 
     win.show()
     try:

@@ -14,3 +14,8 @@ data/
 host/data/
 *.npz
 imu_calibration.json
+
+# MediaPipe hand model (auto-downloaded by camera_tracker.ensure_hand_model)
+host/models/
+*.task
+camera_setup.json

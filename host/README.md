@@ -127,15 +127,37 @@ No 74HC595, no I2C mux, no analog mux for the IMU — the CD74HC4067 is used **o
 for the velostat pads. Wiring: `docs/PINOUT_v3_tactile.txt`.
 
 The viewer is the same **`senz_v3_qt.py`** (it reads `nimu`/`nforce` from the
-banner). With the tactile build the dorsum drives gross hand pose and the **fingers
-render dimmed in a neutral rest pose** (they'll come from the camera later); the
-**tactile overlay + force grids are the focus**.
+banner). The hand is drawn as the **MediaPipe 21-landmark, 5-finger skeleton** —
+the *same* per-finger colored hand the camera program shows (shared `hand_model.py`)
+— so orientation reads at a glance. With the tactile build the dorsum IMU orients
+that hand as a **canonical open pose** (gross movement); pass **`--camera`** to
+**fuse** the live camera so the fingers actually articulate (**IMU = orientation,
+camera = finger shape**). The **tactile overlay + force grids** remain the focus.
 
 ```
 python senz_v3_qt.py --simulate --hand right     # no hardware (tactile sim, default)
 python senz_v3_qt.py --port COM5 --hand right      # wired glove @ 921600
+python senz_v3_qt.py --port COM5 --camera 0        # + fuse a webcam: fingers articulate
 python senz_v3_tactile_sim.py                       # sim alone: print a few frames
 ```
+
+### Control hub (`senz_hub.py`)
+
+One small window to launch the pieces from a **shared set of settings** (glove port,
+camera source, hand, sim build, label) — no remembering flags. Each tool opens in its
+**own** window (spawned via `QProcess`); the hub stays open and shows running/stopped
+status with a **Stop** per row.
+
+```
+python senz_hub.py
+```
+
+- **Camera setup** → `camera_setup.py` (frame/light the camera).
+- **Hand visualizer** → `senz_v3_qt.py` (tick *Fuse camera* to add `--camera`).
+- **Record (connect everything)** → `dataset_recorder.py` (glove + camera → synced CSV).
+- Blank port = `--simulate`, blank camera = `--demo`; **Scan** probes camera indices.
+- A single webcam feeds one program at a time, so the hub **warns** before starting a
+  second camera consumer. Settings persist to `senz_hub.json`; light/dark toggle.
 
 ### Camera setup & alignment (`camera_setup.py`)
 
@@ -148,12 +170,72 @@ banner, and light/dark themes with a **toggle button per overlay/panel**. When t
 framing is good, **Copy recorder command** hands off to `dataset_recorder.py`.
 
 ```
-python camera_setup.py                    # default webcam (index 0)
-python camera_setup.py --source 1          # another camera index
+python camera_setup.py                    # default USB / built-in webcam (index 0)
+python camera_setup.py --source 1          # another USB camera index (or use Scan)
 python camera_setup.py --source http://<phone-ip>:port/video   # phone IP camera
+python camera_setup.py --width 1280 --height 720 --fps 60       # request resolution/fps
 python camera_setup.py --demo               # no webcam/mediapipe (synthetic feed)
 ```
-Needs `opencv-python` + `mediapipe` for a real camera; `--demo` runs the UI without them.
+
+- **USB / built-in cameras** are just an index (`0`, `1`, `2`...). Click **Scan** in the UI
+  to probe which indices work. (Windows uses the DirectShow backend for reliability.)
+- **Phone cameras**: virtual-webcam apps (Iriun/Camo/EpocCam/DroidCam-connect) appear as an
+  index — use Scan. HTTP-stream apps (IP Webcam `:8080/video`, DroidCam Wi-Fi `:4747/video`)
+  use the URL; open it in a browser first to confirm it plays, same Wi-Fi as the PC.
+- **Filters** (Auto-contrast / Brighten / Sharpen) are toggleable **detection aids** — they
+  help MediaPipe in poor light and are *not* saved to the dataset (the glove is the ML input,
+  the camera only produces landmark labels), so they only improve label quality.
+- **fps**: the readout is the real camera/inference throughput; MediaPipe on CPU is the
+  ceiling (~20–30 fps). Requesting a lower resolution or fps via `--width/--height/--fps`,
+  and closing other apps, is the main lever.
+
+Uses the MediaPipe **Tasks HandLandmarker** (the legacy `solutions` API was removed in
+mediapipe 0.10.x on Python 3.13); the model auto-downloads once to `host/models/`. Handedness
+is mirror-corrected so a physical right hand reads as "Right". Needs `opencv-python` +
+`mediapipe` for a real camera; `--demo` runs the UI without them.
+
+---
+
+## Hardware Sprint v3 — pinch build (index / middle / thumb)
+
+A focused build for **pinching-gesture ML**: the three pinching digits fully
+instrumented, everything else dropped. Firmware `firmware/senz_glove_v3_pinch/`,
+wiring `docs/PINOUT_v3_pinch.txt`.
+
+- **8 IMUs**: thumb 3 (base MCP **9-axis** + tip + base 6-axis), index 2, middle 2,
+  and a **dorsum** 6-axis (back-of-hand / palm frame, the LAST IMU).
+- **BNO055** wrist (9-axis, fused) — forearm frame.
+- **12 velostat taxels** = three fingertip **2×2 pinch pads** (thumb C0-3, index
+  C4-7, middle C8-11). **No palm pads** (that's the tactile build). `nforce=12`.
+
+Because the visualizer is schema-driven it serves this build directly, and the
+finger IMUs **articulate the 21-landmark fingers** (the tactile build's fingers
+stay open; the proto/pinch build's fingers curl from their own IMUs). Camera fusion
+still overrides the fingers when `--camera` is given.
+
+```
+python senz_v3_qt.py --simulate --sim pinch --hand right   # pinch sim (no hardware)
+python senz_v3_qt.py --port COM5 --hand right               # wired pinch glove @ 921600
+python senz_v3_pinch_sim.py                                  # sim alone: print a few frames
+```
+
+**Pinch features** (`pinch.py`, pure numpy) turn the two live signals into the
+ML-relevant readout the visualizer shows and the recorder can log:
+
+- **distance** — normalized thumb→index / thumb→middle fingertip gap (scale-free).
+- **force** — pinch pressure per finger = `min(thumb pad, finger pad)`, so it is
+  high only when the thumb **and** that specific finger press together (a mean
+  would leak the shared thumb pad onto the idle finger).
+- **state** — `open` / `index` / `middle` / `both`, force-driven (contact is the
+  ground truth for a tactile pinch).
+
+The pinch simulator scripts an alternating **index-thumb then middle-thumb pinch**
+with matching fingertip contact, so `--sim pinch` exercises the whole path (fusion,
+articulation, force pipeline, pinch classifier) with nothing plugged in.
+
+> Force-pipeline note: `force_pipeline.py` now seeds each channel's baseline from
+> its first sample, so an open pad reads ~0 grip immediately instead of decaying a
+> false-grip transient over the first few seconds (fixed for all builds).
 
 ---
 
@@ -226,14 +308,30 @@ free. Palm taxels capture power/enclosing grasps the fingertips miss.
   freshest-frame queue). Serial + `--simulate`.
 - `senz_visualizer.py` — v2 VPython hand skeleton, one bone per IMU (rendering +
   forward kinematics). Serial + `--simulate`. Fingers flat until fusion lands.
-- **`senz_v3_qt.py`** — v3 **native GPU** hand viz (pyqtgraph/OpenGL): dorsum palm
-  frame + flexing wrist + force overlay; host-side Madgwick fusion; `--hand right|left`.
-  Schema-driven, so it serves both the **tactile** (1 IMU, fingers rest) and **proto**
-  (8 IMU, fingers articulate) builds. Serial + `--simulate` (`--sim tactile|proto`).
+- **`senz_hub.py`** — control hub / launcher: one window, shared settings (port /
+  camera / hand / sim / label), spawns each tool in its own window via `QProcess`,
+  running/stopped status, single-camera guard, light/dark. Pure arg-building helpers
+  are headless-testable.
+- **`hand_model.py`** — the single source of the **21-landmark** hand topology,
+  per-finger colors, canonical open-hand geometry, and `pose_from_world` (camera
+  world-landmarks → orientation-free local shape). Pure numpy; imported by both the
+  visualizer and the camera UI so they draw the same hand.
+- **`senz_v3_qt.py`** — v3 **native GPU** hand viz (pyqtgraph/OpenGL): the MediaPipe
+  **21-landmark 5-finger skeleton** (per `hand_model`) oriented by the dorsum IMU +
+  flexing wrist + force overlay; host-side Madgwick fusion; `--hand right|left`.
+  `--camera <src>` **fuses** a live camera (IMU orients, camera articulates fingers).
+  Schema-driven, so it serves both the **tactile** (1 IMU) and **proto** (8 IMU)
+  builds. Serial + `--simulate` (`--sim tactile|proto`).
 - `senz_v3_tactile_sim.py` — Hardware Sprint v3 **tactile** simulator: 1 dorsum IMU
   (gross rock) + BNO wrist + 15-taxel grasp-cycle force. Default for `--simulate`.
 - `senz_v3_sim.py` — v3 **proto** simulator (8 IMU): scripts a pose animation and emits
   the raw accel/gyro that reproduces it, so `--simulate --sim proto` exercises fusion.
+- `senz_v3_pinch_sim.py` — v3 **pinch** simulator (8 IMU, 12 fingertip taxels): scripts
+  an alternating index-thumb / middle-thumb pinch with matching contact forces. Used by
+  `--sim pinch`.
+- **`pinch.py`** — pinch-gesture features (pure numpy): normalized thumb→finger tip
+  distances, per-finger pinch force `min(thumb pad, finger pad)`, and an
+  open/index/middle/both state. For the pinch build's ML + the viz readout.
 
 ### Calibration
 - `senz_calibrate_pose.py` — v2 zero-pose capture; averages the flat-hand finger
@@ -249,10 +347,12 @@ free. Palm taxels capture power/enclosing grasps the fingertips miss.
 - `force_pipeline.py` — Velostat force-sensor processing (HLD objective 4).
 - `camera_tracker.py` — MediaPipe Hands camera tracking (HLD objective 3). Accepts a
   camera index or a phone IP/RTSP URL; `keep_frame=True` exposes the frame + raw
-  landmarks (+ capture-time stamp) via `get_frame()` for overlay UIs.
-- **`camera_setup.py`** — camera setup & alignment UI: live feed + skeleton overlay +
-  quality warnings + readiness, light/dark themes, per-overlay toggles; `--demo` for no
-  hardware. Pure-numpy metric/`assess` core is headless-testable.
+  landmarks (+ capture-time stamp) via `get_frame()`; `get_world()` returns the 21
+  metric world landmarks for 3D camera fusion.
+- **`camera_setup.py`** — camera setup & alignment UI: live feed + per-finger colored
+  skeleton overlay (shared `hand_model`) + quality warnings + readiness, light/dark
+  themes, per-overlay toggles; `--demo` for no hardware. Pure-numpy metric/`assess`
+  core is headless-testable.
 
 ## Notes
 - The glove streams quaternions (no gimbal lock), so the hand won't flip when
