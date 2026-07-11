@@ -1,0 +1,158 @@
+================================================================================
+ SENZ GLOVE — v3 PROTOTYPE  PIN LAYOUT — LEFT HAND
+ Board: ESP32-S3-DevKitC-1        Sketch: firmware/senz_glove_v3_proto/
+ (electrical wiring is IDENTICAL for the right hand — see PINOUT_v3_proto_RIGHT.txt;
+  only physical placement/orientation and the axis convention differ.)
+================================================================================
+
+ All sensors run at 3.3V logic. NEVER connect 5V to any GPIO or to a common
+ electrode. Power in: 5V USB power bank -> 5V header pin -> onboard reg -> 3V3.
+
+ Sensor set:
+   - wrist  : 1x BNO055                 (I2C)  forearm reference — BNO055 has NO SPI
+   - index  : 2x MPU-6500               (SPI)  proximal + distal
+   - middle : 2x MPU-6500               (SPI)  proximal + distal
+   - thumb  : 2x MPU-6500 + 1x MPU-9250 (SPI)  base + tip + metacarpal
+   - dorsum : 1x MPU-9250               (SPI)  back-of-hand / palm frame (9-axis)
+   - force  : 12x Velostat taxels via CD74HC4067 analog mux -> 1 ADC pin
+ NOTE: the BNO055 supports only I2C/UART (no SPI mode), so the wrist stays on I2C.
+
+--------------------------------------------------------------------------------
+ SHARED BUSES
+--------------------------------------------------------------------------------
+
+ I2C  (BNO055 wrist IMU, 400 kHz)
+   ESP32-S3 GPIO8  -> SDA
+   ESP32-S3 GPIO9  -> SCL
+
+ SPI  (all 8 finger IMUs share this bus, Mode 3, 8 MHz start)
+   ESP32-S3 GPIO11 -> MOSI / SDI   (data to sensors)
+   ESP32-S3 GPIO12 -> SCLK         (clock)
+   ESP32-S3 GPIO13 -> MISO / SDO   (data from sensors)
+   Chip-select (NCS) is one dedicated GPIO per sensor — see table below.
+
+================================================================================
+ FINGER IMUs (x8) — module pin -> connection
+================================================================================
+ MPU-6500 and MPU-9250 breakouts wire IDENTICALLY for SPI (the 9250 is a 6500
+ core + magnetometer). The breakout labels are I2C-style but pins are used as SPI:
+
+   PIN     ROLE (SPI mode)         CONNECT TO
+   -----   ---------------------   ------------------------------------------
+   VCC     3.3V power              3V3 rail
+   GND     ground                  GND rail
+   SCL     SPI clock  (SCLK)       GPIO12  (shared SCLK, all 8)
+   SDA     SPI data in (SDI/MOSI)  GPIO11  (shared MOSI, all 8)
+   AD0     SPI data out (SDO/MISO) GPIO13  (shared MISO, all 8)
+   NCS     chip select (active LO) dedicated GPIO per sensor (table below)
+   EDA     aux I2C master SDA      not connected  <-- NOT the SPI bus
+   ECL     aux I2C master SCL      not connected  <-- NOT the SPI bus
+   INT     data-ready interrupt    not connected (firmware polls at 200 Hz)
+   FSYNC   frame sync              GND (tie low — unused, do not leave floating)
+
+ Per-sensor NCS chip-select map:
+
+   IMU #   NCS -> GPIO   LOCATION            CHIP        WHO_AM_I
+   -----   -----------   -----------------   ---------   --------
+     0       GPIO4       Index  proximal     MPU-6500    0x70
+     1       GPIO5       Index  distal       MPU-6500    0x70
+     2       GPIO14      Middle proximal     MPU-6500    0x70
+     3       GPIO17      Middle distal       MPU-6500    0x70
+     4       GPIO18      Thumb  base         MPU-6500    0x70
+     5       GPIO21      Thumb  tip          MPU-6500    0x70
+     6       GPIO39      Thumb  metacarpal   MPU-9250    0x71   (9-axis)
+     7       GPIO38      Hand   dorsum       MPU-9250    0x71   (9-axis, palm frame)
+
+ NOTE: firmware accepts WHO_AM_I 0x70 AND 0x71, so 6500s and the 9250 mix freely
+ on the same bus. The 9250's magnetometer is not read in this prototype.
+
+================================================================================
+ BNO055  (x1, wrist reference IMU) — module pin -> connection
+================================================================================
+
+   PIN       ROLE                 CONNECT TO
+   -------   ------------------    ------------------------------------------
+   VIN       3.3V power            3V3 rail
+   GND       ground                GND rail
+   SCL/RX    I2C clock             GPIO9   (shared I2C SCL)
+   SDA/TX    I2C data              GPIO8   (shared I2C SDA)
+   AD0       I2C address select    GND  -> address 0x28 (matches firmware)
+   INT       interrupt out         not connected
+   BOOT      boot / mode (PS1)     not connected (default = I2C mode)
+   REST      reset (active low)    not connected (internal pull-up)
+
+================================================================================
+ VELOSTAT FORCE ARRAY (15 taxels) via CD74HC4067 analog mux
+================================================================================
+ 15 pads: thumb 2x2 -> C0..C3,  index 2x2 -> C4..C7,  middle 2x2 -> C8..C11,
+ palm -> C12 center / C13 thenar / C14 hypothenar.
+ One shared divider resistor at the mux common; only one channel is connected
+ at a time, so a single resistor serves all 15.
+
+   Divider (per selected pad):
+
+     3V3 -- common faraday -- [ velostat pad ] -- top pad -- Cn
+                                                              |
+                              mux COM/SIG --------------------+-- GPIO10 (ADC1)
+                                          |
+                                          +-- 10k..22k -- GND        (divider R)
+                                          +-- 1..10nF  -- GND        (optional filter)
+
+   CD74HC4067 pin   ->  ESP32-S3
+   --------------       ----------------------------------------------------
+   VCC              ->  3V3
+   GND              ->  GND
+   SIG (COM)        ->  GPIO10   (ADC1_CH9)  + the 10k..22k resistor to GND
+   EN  (enable)     ->  GND      (active-low; grounded = always enabled)
+   S0               ->  GPIO6    (channel-select bit 0)
+   S1               ->  GPIO7    (bit 1)
+   S2               ->  GPIO15   (bit 2)
+   S3               ->  GPIO16   (bit 3)
+   C0..C3           ->  thumb pads (2x2)    top-pad wires
+   C4..C7           ->  index pads (2x2)    top-pad wires
+   C8..C11          ->  middle pads (2x2)   top-pad wires
+   C12              ->  palm center          top-pad wire
+   C13              ->  palm thenar (thumb-side mound)
+   C14              ->  palm hypothenar (pinky-side mound)
+   C15              ->  unused (leave open)
+
+   Common faraday plane(s)  ->  3V3   (shared by all pads)
+
+ IMPORTANT: use ADC1 (GPIO1..GPIO10) for SIG — never ADC2. ADC2 stops working
+ when BLE/WiFi is on, and BLE is on the roadmap. GPIO10 is ADC1, so it's safe.
+
+================================================================================
+ PIN USAGE SUMMARY / CONFLICT CHECK
+================================================================================
+   SPI bus        : GPIO11, GPIO12, GPIO13
+   I2C bus        : GPIO8,  GPIO9
+   IMU chip sel   : GPIO4,  GPIO5, GPIO14, GPIO17, GPIO18, GPIO21, GPIO39, GPIO38
+   Mux select     : GPIO6,  GPIO7, GPIO15, GPIO16
+   Mux SIG (ADC1) : GPIO10
+   -> all distinct, all legal ESP32-S3 pins, no boot-strapping conflicts.
+
+ FREE GPIOs REMAINING: GPIO40 only  (+ the 9250 mags, unused).
+   Room later for: OLED status, more taxels (C12..C15 need no new pins), or a
+   74HC595 CS expander to scale IMUs back up.
+
+================================================================================
+ PHYSICAL PLACEMENT & ORIENTATION — LEFT HAND
+================================================================================
+ Mounting (palm DOWN, fingers pointing away from you):
+
+   - Finger IMUs: one on each phalanx segment, chip flat on the segment, cable
+     toward the wrist. index/middle get proximal + distal; thumb gets metacarpal,
+     proximal (base), and distal (tip).
+   - Hand-dorsum IMU (GPIO38): flat on the BACK OF THE HAND, over the index/middle
+     metacarpals (the knuckle area). This is the palm/hand reference frame.
+   - Wrist BNO055: on the FOREARM just behind the wrist. The visualizer shows the
+     wrist joint as the angle between this and the dorsum IMU.
+
+ Reference accelerometer frame (finger IMUs, LEFT hand, hand flat/palm down):
+   +Y  points away from the hand (finger direction)
+   +X  points toward the THUMB   (on a LEFT hand the thumb is on your RIGHT/+X side)
+   +Z  points UP, out the back of the hand (toward the ceiling)
+
+ In the visualizer run with `--hand left`. If a finger points the wrong way, use
+ the per-sensor Axis remap; the LEFT-hand mirror is typically "invert X".
+================================================================================

@@ -112,7 +112,9 @@ class MultiSerialSource:
         deadline = time.time() + timeout
         while time.time() < deadline:
             line = self.ser.readline().decode("utf-8", errors="ignore").strip()
-            if line.startswith("# senz-multi"):
+            # Any senz banner carries nimu/nforce/rate (senz-multi, senz-v3proto,
+            # senz-v3tactile, ...), so match the family rather than one firmware.
+            if line.startswith("# senz-"):
                 banner = line
             elif line.startswith("# columns:") and banner:
                 return Schema.from_header(banner, line)

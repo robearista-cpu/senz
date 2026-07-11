@@ -110,6 +110,91 @@ In-window controls (no restart needed):
 
 ---
 
+## Hardware Sprint v3 — tactile-first (current)
+
+This sprint is scoped to **getting the tactile (velostat force) data down solid**
+plus **gross hand movement** — *not* every finger accelerometer. Fine finger motion
+is deferred to **camera** capture (`camera_tracker.py`) in a later fusion pass. The
+firmware (`firmware/senz_glove_v3_tactile/`) is minimal:
+
+- **BNO055** wrist (I2C) — forearm frame.
+- **1× MPU-9250 dorsum IMU** (SPI, single direct `CS=GPIO4`) — back-of-hand/palm
+  frame. Together they give hand orientation + wrist-flex.
+- **15-taxel velostat array** via the CD74HC4067 (the deliverable): thumb/index/
+  middle fingertip 2×2 + palm center/thenar/hypothenar.
+
+No 74HC595, no I2C mux, no analog mux for the IMU — the CD74HC4067 is used **only**
+for the velostat pads. Wiring: `docs/PINOUT_v3_tactile.txt`.
+
+The viewer is the same **`senz_v3_qt.py`** (it reads `nimu`/`nforce` from the
+banner). With the tactile build the dorsum drives gross hand pose and the **fingers
+render dimmed in a neutral rest pose** (they'll come from the camera later); the
+**tactile overlay + force grids are the focus**.
+
+```
+python senz_v3_qt.py --simulate --hand right     # no hardware (tactile sim, default)
+python senz_v3_qt.py --port COM5 --hand right      # wired glove @ 921600
+python senz_v3_tactile_sim.py                       # sim alone: print a few frames
+```
+
+---
+
+## Hardware Sprint v3 prototype — native GPU visualizer
+
+The v3 prototype firmware (`firmware/senz_glove_v3_proto/`) is a trimmed build —
+wrist (BNO055, forearm) + index (2 IMUs) + middle (2 IMUs) + thumb (3 IMUs) + a
+**back-of-hand dorsum IMU** + a **12-taxel velostat force array** — streaming a
+self-describing CSV of **raw** accel/gyro + force (`senz_multi_io.py`). Its viewer
+is **`senz_v3_qt.py`**: a **native OpenGL window** (pyqtgraph + PyOpenGL + PyQt5),
+*not* a browser — shaded cylinder bones + sphere joints at ~100 fps, on-hand force
+patches, and a side panel of the three 2×2 force grids. Because the firmware sends
+raw data, the host runs **Madgwick fusion per finger IMU** (the wrist is already
+fused on-device).
+
+The **dorsum IMU drives the hand/palm frame** (fingers hang off it); the wrist
+BNO055 is the **forearm** frame, and the wrist between them renders as a **flexing
+polygon** that bends with wrist flex/deviation (not a rigid box). Wiring:
+`docs/PINOUT_v3_proto.txt` (left hand) and `docs/PINOUT_v3_proto_RIGHT.txt`.
+
+### Run it
+```
+python senz_v3_qt.py --simulate --hand right   # no hardware (default right hand)
+python senz_v3_qt.py --port COM5 --hand right    # wired glove @ 921600 (--baud to override)
+python senz_v3_qt.py --simulate --hand left       # left-hand layout
+```
+The base simulator on its own (sanity-check the synthetic stream):
+```
+python senz_v3_sim.py                 # prints a few synthetic frames
+```
+`--simulate` drives the whole pipeline — fingers curl, wrist rocks, force pads pulse
+— so you see it move with nothing plugged in.
+
+### In-window controls (right panel)
+- **Theme: Dark/Light** — toggles both the control panel and the 3D viewbox
+  (background + grid) between dark and light modes.
+- **Sensor** dropdown — pick the wrist (forearm), any of the 8 finger IMUs, or the
+  **hand-dorsum** to edit.
+- **Enabled** — temporarily disable a sensor; its bone dims and freezes straight.
+- **Axis remap** (X/Y/Z ← ±source) — invert/swap a sensor's axes to match its mount.
+  Handedness is set by `--hand`; if a finger still points wrong, remap that sensor —
+  the **left** hand typically needs **invert X** (defined as toward the thumb), the
+  **right** hand usually needs none. Only valid signed permutations (real rotations)
+  are accepted; duplicate axes are ignored.
+- **Zero hand** — tare the current pose as neutral (hold flat, click). **Clear zero**
+  undoes it. **Zero force** — re-baseline the velostat taxels.
+- Telemetry shows the live **wrist-flex angle** (forearm vs hand frame).
+
+Force channels (firmware order): thumb `force0–3`, index `force4–7`, middle `force8–11`
+(2×2 each), **palm** `force12` center / `force13` thenar / `force14` hypothenar. `C15`
+free. Palm taxels capture power/enclosing grasps the fingertips miss.
+
+> **6-axis limitation:** the finger IMUs are accel+gyro (no magnetometer), so rotation
+> about the gravity (yaw) axis is not directly observable — finger *curl* tracks well
+> while *spread* can drift. The wrist BNO055 (with mag) anchors heading, and Zero-hand
+> resets per-finger offsets. Inherent to 6-axis fusion, not a bug.
+
+---
+
 ## Files
 
 ### Visualization & I/O
@@ -123,6 +208,14 @@ In-window controls (no restart needed):
   freshest-frame queue). Serial + `--simulate`.
 - `senz_visualizer.py` — v2 VPython hand skeleton, one bone per IMU (rendering +
   forward kinematics). Serial + `--simulate`. Fingers flat until fusion lands.
+- **`senz_v3_qt.py`** — v3 **native GPU** hand viz (pyqtgraph/OpenGL): dorsum palm
+  frame + flexing wrist + force overlay; host-side Madgwick fusion; `--hand right|left`.
+  Schema-driven, so it serves both the **tactile** (1 IMU, fingers rest) and **proto**
+  (8 IMU, fingers articulate) builds. Serial + `--simulate` (`--sim tactile|proto`).
+- `senz_v3_tactile_sim.py` — Hardware Sprint v3 **tactile** simulator: 1 dorsum IMU
+  (gross rock) + BNO wrist + 15-taxel grasp-cycle force. Default for `--simulate`.
+- `senz_v3_sim.py` — v3 **proto** simulator (8 IMU): scripts a pose animation and emits
+  the raw accel/gyro that reproduces it, so `--simulate --sim proto` exercises fusion.
 
 ### Calibration
 - `senz_calibrate_pose.py` — v2 zero-pose capture; averages the flat-hand finger
