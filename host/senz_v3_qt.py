@@ -1075,7 +1075,11 @@ def main():
     forces = ForceArray(schema.nforce, rate=schema.rate or 200)
     fcfg = ForceConfig(schema.nforce)   # per-channel enable + source remap
     state = {"prev_t": None, "fps": 0.0, "tlast": None, "raw_quats": None,
-             "accel": True}             # accelerometer on/off in the IMU fusion
+             "accel": True,             # accelerometer on/off in the IMU fusion
+             # IMU health: a dead/miswired IMU streams zeros (firmware zeros absent
+             # sensors), which pins its fusion at identity -> the hand won't orient.
+             # Latch "alive" once a sensor shows real motion (gravity is always ~1g).
+             "imu_alive": [False] * n_imu, "bno_alive": False}
 
     app = QtWidgets.QApplication(sys.argv)
     win = QtWidgets.QWidget()
@@ -1172,11 +1176,16 @@ def main():
         for k in range(n_imu):
             ax, ay, az = mio.imu_accel_g(frame, k)
             gx, gy, gz = mio.imu_gyro_dps(frame, k)
+            if abs(ax) + abs(ay) + abs(az) > 0.1:   # a live IMU always sees ~1g
+                state["imu_alive"][k] = True
             if not use_accel:
                 ax = ay = az = 0.0      # gyro-only: Madgwick skips gravity correction
             raw_quats.append(filters[k].update(gx * d2r, gy * d2r, gz * d2r,
                                                ax, ay, az, dt))
         state["raw_quats"] = raw_quats
+        if sum(abs(frame.get(q, 0.0)) for q in
+               ("bno_qw", "bno_qx", "bno_qy", "bno_qz")) > 1e-6:
+            state["bno_alive"] = True
 
         fp = process_frame(frame, forces, fcfg)
         ctrl.update_force(fp)
@@ -1197,6 +1206,19 @@ def main():
         state["tlast"] = now
         lines = [f"fps ~ {state['fps']:5.1f}   dt {dt*1e3:4.1f} ms   hand={args.hand}",
                  f"drive: {skel['driven']}   wrist flex {skel['flex_deg']:5.1f} deg", ""]
+        # IMU health: name any sensor streaming only zeros (dead / miswired / not
+        # detected by the firmware). The dorsum is the LAST IMU and orients the hand,
+        # so if it's dead the hand won't move at all -- flag it prominently.
+        dead = [i for i, a in enumerate(state["imu_alive"]) if not a]
+        warn = []
+        if n_imu and not state["bno_alive"]:
+            warn.append("BNO wrist")
+        if dead:
+            warn.append("IMU " + ",".join(
+                ("dorsum" if i == n_imu - 1 else f"imu{i}") for i in dead))
+        if warn:
+            lines += ["!! NO DATA (zeros): " + "; ".join(warn),
+                      "   check wiring / send '?' for firmware health", ""]
         for c in ("thumb", "index", "middle"):
             b = FORCE_BASE[c]
             bars = " ".join(f"{fp[b+i]['relative_grip']:.2f}" for i in range(4))

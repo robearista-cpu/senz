@@ -41,6 +41,59 @@ def _require_bleak():
             "`pip install bleak` (already listed in host/requirements.txt).") from e
 
 
+def _win_init_mta():
+    """On Windows, put the CURRENT thread's COM apartment into MTA so bleak's WinRT
+    backend can deliver BLE callbacks.
+
+    A Qt GUI thread is a Single-Threaded Apartment (STA); on it bleak raises
+    "Thread is configured for Windows GUI but callbacks are not working" and no
+    scan/advertisement callbacks fire, because WinRT needs either a pumped STA
+    (which a blocking asyncio ``run_until_complete`` starves) or an MTA. A fresh
+    worker thread starts uninitialized, so we can claim it as MTA here. Best-effort
+    and a silent no-op off Windows / if the apartment is already set."""
+    import sys
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+        # CoInitializeEx(NULL, COINIT_MULTITHREADED = 0x0). S_OK(0)/S_FALSE(1) fine;
+        # RPC_E_CHANGED_MODE means it's already STA and can't be changed -- ignore.
+        ctypes.windll.ole32.CoInitializeEx(None, 0x0)
+    except Exception:
+        pass
+
+
+def _run_bleak(coro_factory, wait):
+    """Run a bleak coroutine on a DEDICATED worker thread (MTA on Windows) and
+    return its result, re-raising any error. Using our own thread -- never the
+    caller's, which for a GUI app is the STA main thread bleak refuses to run on --
+    is what makes BLE work from inside Qt. ``coro_factory`` is a 0-arg function that
+    builds the coroutine (so bleak is imported on the worker thread)."""
+    import asyncio
+
+    out = {"val": None, "err": None}
+
+    def _worker():
+        _win_init_mta()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            out["val"] = loop.run_until_complete(coro_factory())
+        except Exception as e:                      # surfaced to the caller below
+            out["err"] = e
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join(wait)
+    if t.is_alive():
+        raise TimeoutError(f"BLE operation did not finish within {wait:.0f}s")
+    if out["err"] is not None:
+        raise out["err"]
+    return out["val"]
+
+
 # ----------------------------------------------------------------------------
 # Line + schema assembler (pure, no BLE -- unit-testable)
 # ----------------------------------------------------------------------------
@@ -133,6 +186,7 @@ class BleMultiSource:
     def _run(self):
         import asyncio
 
+        _win_init_mta()              # MTA so WinRT BLE callbacks fire (see helper)
         asyncio.set_event_loop(self._loop)
         try:
             self._loop.run_until_complete(self._main())
@@ -203,19 +257,15 @@ def scan_ble(timeout=6.0):
         _require_bleak()
     except RuntimeError:
         return []
-    import asyncio
-
-    from bleak import BleakScanner
 
     async def _scan():
+        from bleak import BleakScanner
         devs = await BleakScanner.discover(timeout=timeout)
         return [(d.name or "(unknown)", d.address) for d in devs]
 
-    loop = asyncio.new_event_loop()
-    try:
-        found = loop.run_until_complete(_scan())
-    finally:
-        loop.close()
+    # Run on a dedicated MTA worker thread -- calling bleak directly from the Qt GUI
+    # (STA) thread is what triggers "callbacks are not working" on Windows.
+    found = _run_bleak(_scan, wait=timeout + 10.0)
     # senz devices first, then the rest.
     found.sort(key=lambda na: (not str(na[0]).lower().startswith("senz"), str(na[0])))
     return found
