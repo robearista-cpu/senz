@@ -129,9 +129,24 @@ class ForceConfig:
         self.n = n
         self.enabled = [True] * n
         self.source = list(range(n))   # identity: logical m <- physical m
+        self.reversed = [False] * n    # invert the ADC (pressed<->released) per pad
 
     def set_enabled(self, m, on):
         self.enabled[m] = bool(on)
+
+    def set_reversed(self, m, on):
+        """Reverse a channel whose value runs backwards (a flipped voltage divider /
+        mis-wired velostat leg reads HIGH when open and LOW when pressed). When set,
+        the raw ADC is inverted (ADC_MAX - raw) before processing, so grip/contact
+        rise with pressure like every other pad. The displayed raw stays the true
+        reading."""
+        if 0 <= m < self.n:
+            self.reversed[m] = bool(on)
+
+    def feed_value(self, m, raw):
+        """The ADC value to actually process for logical channel ``m`` (inverted if
+        the channel is reversed). The displayed 'raw' keeps the true reading."""
+        return (ADC_MAX - raw) if (0 <= m < self.n and self.reversed[m]) else raw
 
     def set_source(self, m, raw):
         """Route logical channel ``m`` to physical channel ``raw`` (validated)."""
@@ -144,9 +159,10 @@ class ForceConfig:
             self.source[a], self.source[b] = self.source[b], self.source[a]
 
     def reset(self):
-        """Back to identity routing with every channel enabled."""
+        """Back to identity routing, every channel enabled and non-reversed."""
         self.source = list(range(self.n))
         self.enabled = [True] * self.n
+        self.reversed = [False] * self.n
 
     def route(self, raws):
         """Reorder a physical raw list so output index ``m`` holds ``source[m]``."""
@@ -179,12 +195,14 @@ def process_frame(frame, array, cfg=None):
     result still carries the physical ``raw`` count it was fed.
     """
     raws = [frame[f"force{m}"] for m in range(len(array.channels))]
-    if cfg is not None:
-        raws = cfg.route(raws)
-    out = array.update(raws)
-    if cfg is not None:
-        out = cfg.mask(out)
-    return out
+    if cfg is None:
+        return array.update(raws)
+    raws = cfg.route(raws)                                  # physical -> logical
+    feed = [cfg.feed_value(m, r) for m, r in enumerate(raws)]   # invert if reversed
+    out = array.update(feed)
+    for m in range(min(cfg.n, len(out))):
+        out[m]["raw"] = raws[m]                             # show the TRUE reading
+    return cfg.mask(out)
 
 
 if __name__ == "__main__":

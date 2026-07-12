@@ -160,8 +160,29 @@ def _filter_sharpen(rgb):
     return cv2.addWeighted(rgb, 1.5, blur, -0.5, 0)
 
 
+def _filter_glove_green(rgb):
+    """Recolor a GREEN glove toward skin tone so MediaPipe's hand detector fires.
+
+    MediaPipe Hands is trained on bare skin and mostly ignores a solid green glove.
+    This HSV-masks the green pixels and shifts only their hue + saturation to a warm
+    skin tone, keeping each pixel's original *value* (brightness) -- so the knuckle
+    and finger shading that MediaPipe keys on as the hand *shape* survives. It is a
+    detection AID only: it changes the frame fed to the model + shown in the UI, not
+    the ML dataset (the glove + force sensors remain the real inputs)."""
+    import cv2
+    import numpy as np
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    h, s, v = cv2.split(hsv)
+    # OpenCV hue is 0..179; green spans ~35..95. Mask reasonably saturated/lit green
+    # so a green background wall gets recolored too (harmless) but shadows don't.
+    mask = (h >= 35) & (h <= 95) & (s >= 45) & (v >= 30)
+    h[mask] = 12                                  # warm skin hue
+    s[mask] = np.uint8(115)                       # moderate skin saturation
+    return cv2.cvtColor(cv2.merge((h, s, v)), cv2.COLOR_HSV2RGB)
+
+
 FILTER_FUNCS = {"auto_contrast": _filter_clahe, "brighten": _filter_gamma,
-                "sharpen": _filter_sharpen}
+                "sharpen": _filter_sharpen, "glove_green": _filter_glove_green}
 
 
 def list_cameras(max_index=6):

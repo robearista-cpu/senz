@@ -82,8 +82,9 @@ LAYERS = [
 DEFAULT_LAYERS = {k: (k not in ("grid", "mirror")) for _, k in LAYERS}
 
 # Detection-aid video filters (applied to the frame fed to MediaPipe + shown).
+# "Green glove" recolors a green glove toward skin so MediaPipe can detect it.
 FILTERS = [("Auto-contrast", "auto_contrast"), ("Brighten", "brighten"),
-           ("Sharpen", "sharpen")]
+           ("Sharpen", "sharpen"), ("Green glove", "glove_green")]
 DEFAULT_FILTERS = {k: False for _, k in FILTERS}
 
 # Capture optimization choices (the levers that matter for USB bandwidth + CPU).

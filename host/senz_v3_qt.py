@@ -597,6 +597,16 @@ class ControlPanel:
         self.forcetest_btn.clicked.connect(self._on_forcetest)
         lay.addWidget(self.forcetest_btn)
 
+        # Accelerometer on/off: when off, the finger-IMU fusion integrates gyro only
+        # (no gravity correction) -- useful to isolate accel noise / drift.
+        self._accel = True
+        self._accel_cb = None
+        self.accel_btn = QtWidgets.QPushButton("Accel: On")
+        self.accel_btn.setToolTip("Toggle the accelerometer in the IMU fusion "
+                                  "(off = gyro-only, no gravity correction)")
+        self.accel_btn.clicked.connect(self._on_accel)
+        lay.addWidget(self.accel_btn)
+
         lay.addWidget(QtWidgets.QLabel("<b>Sensor</b>"))
         self.sensor_box = QtWidgets.QComboBox()
         self.sensor_box.addItems(sensor_labels)
@@ -701,6 +711,15 @@ class ControlPanel:
     def set_style_callback(self, cb):
         self._style_cb = cb
 
+    def set_accel_callback(self, cb):
+        self._accel_cb = cb
+
+    def _on_accel(self):
+        self._accel = not self._accel
+        self.accel_btn.setText(f"Accel: {'On' if self._accel else 'Off'}")
+        if self._accel_cb:
+            self._accel_cb(self._accel)
+
     def _on_style(self):
         self._style = "lowpoly" if self._style == "noodle" else "noodle"
         self.style_btn.setText(f"Style: {'Low-poly' if self._style == 'lowpoly' else 'Noodle'}")
@@ -797,7 +816,7 @@ class ForceTestPanel:
 
         grid = QtWidgets.QGridLayout()
         grid.setHorizontalSpacing(8)
-        headers = ("#", "channel", "on", "src", "raw", "level (0..4095)",
+        headers = ("#", "channel", "on", "rev", "src", "raw", "level (0..4095)",
                    "min", "max", "touch", "")
         for col, h in enumerate(headers):
             grid.addWidget(QtWidgets.QLabel(f"<b>{h}</b>"), 0, col)
@@ -805,7 +824,7 @@ class ForceTestPanel:
         mono = QtGui.QFont("Courier New", 10)
         self.bars, self.raw_lbls = [], []
         self.min_lbls, self.max_lbls, self.dots = [], [], []
-        self.enable_cbs, self.src_spins = [], []
+        self.enable_cbs, self.rev_cbs, self.src_spins = [], [], []
         for m in range(nforce):
             r = m + 1
             grid.addWidget(QtWidgets.QLabel(str(m)), r, 0)
@@ -816,43 +835,50 @@ class ForceTestPanel:
             en.stateChanged.connect(lambda _s, i=m: self._on_enable(i))
             grid.addWidget(en, r, 2)
 
+            rev = QtWidgets.QCheckBox()
+            rev.setChecked(self.cfg.reversed[m])
+            rev.setToolTip("reverse: this pad reads high when open, low when pressed")
+            rev.stateChanged.connect(lambda _s, i=m: self._on_reverse(i))
+            grid.addWidget(rev, r, 3)
+
             spin = QtWidgets.QSpinBox()
             spin.setRange(0, nforce - 1)
             spin.setValue(self.cfg.source[m])
             spin.setFixedWidth(48)
             spin.setToolTip("physical channel that feeds this pad")
             spin.valueChanged.connect(lambda v, i=m: self._on_src(i, v))
-            grid.addWidget(spin, r, 3)
+            grid.addWidget(spin, r, 4)
 
             raw = QtWidgets.QLabel("----"); raw.setFont(mono)
             raw.setMinimumWidth(48)
             raw.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-            grid.addWidget(raw, r, 4)
+            grid.addWidget(raw, r, 5)
 
             bar = QtWidgets.QProgressBar()
             bar.setRange(0, 4095)
             bar.setTextVisible(False)
             bar.setFixedSize(190, 16)
-            grid.addWidget(bar, r, 5)
+            grid.addWidget(bar, r, 6)
 
             lo = QtWidgets.QLabel("-"); lo.setFont(mono)
             hi = QtWidgets.QLabel("-"); hi.setFont(mono)
-            grid.addWidget(lo, r, 6)
-            grid.addWidget(hi, r, 7)
+            grid.addWidget(lo, r, 7)
+            grid.addWidget(hi, r, 8)
 
             dot = QtWidgets.QLabel("●")   # filled circle
             dot.setStyleSheet(f"color: {self._FLAT};")
-            grid.addWidget(dot, r, 8)
+            grid.addWidget(dot, r, 9)
 
             zb = QtWidgets.QPushButton("0")
             zb.setFixedWidth(28)
             zb.setToolTip("zero / re-baseline this channel")
             zb.clicked.connect(lambda _c, i=m: self._zero_channel(i))
-            grid.addWidget(zb, r, 9)
+            grid.addWidget(zb, r, 10)
 
             self.bars.append(bar); self.raw_lbls.append(raw)
             self.min_lbls.append(lo); self.max_lbls.append(hi); self.dots.append(dot)
-            self.enable_cbs.append(en); self.src_spins.append(spin)
+            self.enable_cbs.append(en); self.rev_cbs.append(rev)
+            self.src_spins.append(spin)
 
         lay.addLayout(grid)
         self.summary = QtWidgets.QLabel()
@@ -880,6 +906,11 @@ class ForceTestPanel:
     def _on_enable(self, m):
         self.cfg.set_enabled(m, self.enable_cbs[m].isChecked())
 
+    def _on_reverse(self, m):
+        self.cfg.set_reversed(m, self.rev_cbs[m].isChecked())
+        self._reset_channel_range(m)
+        self._on_zero([m])       # baseline was learned at the old polarity
+
     def _on_src(self, m, v):
         self.cfg.set_source(m, v)
         self._reset_channel_range(m)
@@ -896,12 +927,11 @@ class ForceTestPanel:
     def _reset_order(self):
         self.cfg.reset()
         for m in range(self.n):
-            self.src_spins[m].blockSignals(True)
-            self.src_spins[m].setValue(m)
-            self.src_spins[m].blockSignals(False)
-            self.enable_cbs[m].blockSignals(True)
-            self.enable_cbs[m].setChecked(True)
-            self.enable_cbs[m].blockSignals(False)
+            for w, val in ((self.src_spins[m], m), (self.enable_cbs[m], True),
+                           (self.rev_cbs[m], False)):
+                w.blockSignals(True)
+                (w.setValue if hasattr(w, "setValue") else w.setChecked)(val)
+                w.blockSignals(False)
         self.reset_ranges()
         self._on_zero(None)
 
@@ -1044,7 +1074,8 @@ def main():
     filters = [MadgwickAHRS(beta=args.beta) for _ in range(n_imu)]
     forces = ForceArray(schema.nforce, rate=schema.rate or 200)
     fcfg = ForceConfig(schema.nforce)   # per-channel enable + source remap
-    state = {"prev_t": None, "fps": 0.0, "tlast": None, "raw_quats": None}
+    state = {"prev_t": None, "fps": 0.0, "tlast": None, "raw_quats": None,
+             "accel": True}             # accelerometer on/off in the IMU fusion
 
     app = QtWidgets.QApplication(sys.argv)
     win = QtWidgets.QWidget()
@@ -1112,6 +1143,7 @@ def main():
 
     ctrl.set_theme_callback(apply_theme)
     ctrl.set_style_callback(hand.set_style)
+    ctrl.set_accel_callback(lambda on: state.__setitem__("accel", on))
 
     def set_forcetest(on):
         # Swap the 3D hand for the force-only bars (and back). tick() reads this
@@ -1136,9 +1168,12 @@ def main():
 
         raw_quats = [_wrist_quat(frame)]
         d2r = math.pi / 180.0
+        use_accel = state.get("accel", True)
         for k in range(n_imu):
             ax, ay, az = mio.imu_accel_g(frame, k)
             gx, gy, gz = mio.imu_gyro_dps(frame, k)
+            if not use_accel:
+                ax = ay = az = 0.0      # gyro-only: Madgwick skips gravity correction
             raw_quats.append(filters[k].update(gx * d2r, gy * d2r, gz * d2r,
                                                ax, ay, az, dt))
         state["raw_quats"] = raw_quats

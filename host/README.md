@@ -229,9 +229,13 @@ python camera_setup.py --demo               # no webcam/mediapipe (synthetic fee
 - **Phone cameras**: virtual-webcam apps (Iriun/Camo/EpocCam/DroidCam-connect) appear as an
   index — use Scan. HTTP-stream apps (IP Webcam `:8080/video`, DroidCam Wi-Fi `:4747/video`)
   use the URL; open it in a browser first to confirm it plays, same Wi-Fi as the PC.
-- **Filters** (Auto-contrast / Brighten / Sharpen) are toggleable **detection aids** — they
-  help MediaPipe in poor light and are *not* saved to the dataset (the glove is the ML input,
-  the camera only produces landmark labels), so they only improve label quality.
+- **Filters** (Auto-contrast / Brighten / Sharpen / **Green glove**) are toggleable
+  **detection aids** — they help MediaPipe in poor light and are *not* saved to the dataset
+  (the glove is the ML input, the camera only produces landmark labels), so they only improve
+  label quality. **Green glove** recolors a green glove toward skin tone (keeping the finger
+  shading MediaPipe reads as hand *shape*) so the hand detector fires — MediaPipe is trained on
+  bare skin and otherwise ignores a solid-green glove. If detection is still flaky, add light
+  and keep the whole hand in frame.
 - **fps**: the readout is the real camera/inference throughput; MediaPipe on CPU is the
   ceiling (~20–30 fps). Requesting a lower resolution or fps via `--width/--height/--fps`,
   and closing other apps, is the main lever.
@@ -388,13 +392,19 @@ python senz_v3_sim.py                 # prints a few synthetic frames
   calibration controls:
   - **on** checkbox — **deactivate a broken pad** (e.g. a dead thumb pad) so it no
     longer drives grip/contact; its raw bar still shows what it reads (dimmed).
+  - **rev** checkbox — **reverse a channel** that reads backwards (high when open,
+    low when pressed, from a flipped divider / mis-wired velostat leg). The ADC is
+    inverted before processing so grip rises with pressure; the shown raw stays true.
   - **src** spinbox — **re-designate which physical channel feeds this pad**, for a
     finger whose array came back mis-wired/reversed, without re-soldering. Changing
     it re-zeros that channel.
   - **0** button — **zero/re-baseline just that channel**.
   - **Zero all (calibrate)** — hold the hand open, click: every channel takes its
     current reading as zero. **Reset min/max** clears the spread; **Reset order**
-    restores identity routing and re-enables all pads.
+    restores identity routing, re-enables all pads, and clears reversals.
+- **Accel: On/Off** — toggle the accelerometer in the finger-IMU fusion. Off = the
+  Madgwick filter integrates **gyro only** (no gravity correction) — useful to see
+  whether accel noise/vibration is driving orientation jitter.
 - Telemetry shows the live **wrist-flex angle** (forearm vs hand frame).
 
 Force channels (firmware order): thumb `force0–3`, index `force4–7`, middle `force8–11`
