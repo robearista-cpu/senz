@@ -67,11 +67,16 @@ class ForceChannel:
             self.baseline = grip
         else:
             self.value += self.a_lp * (grip - self.value)
-            # Baseline only tracks downward / slowly upward (so a sustained press
-            # doesn't get absorbed into the baseline immediately).
+            # Decide contact against the CURRENT baseline first, then move the
+            # baseline. Snap it DOWN fast on release; drift it UP slowly only while
+            # the pad is OPEN. Holding a press used to let the slow (~3 s) baseline
+            # creep up to the pressed level, so a sustained press faded back to zero
+            # in ~3 s -- freezing the baseline during contact keeps the press
+            # registered for as long as you hold it (drift removal resumes on release).
+            in_contact = (self.value - self.baseline) > self.contact_delta
             if self.value < self.baseline:
                 self.baseline += 0.5 * (self.value - self.baseline)  # fast release
-            else:
+            elif not in_contact:
                 self.baseline += self.a_base * (self.value - self.baseline)
 
         above = max(0.0, self.value - self.baseline)

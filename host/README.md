@@ -405,7 +405,14 @@ python senz_v3_sim.py                 # prints a few synthetic frames
 - **Accel: On/Off** — toggle the accelerometer in the finger-IMU fusion. Off = the
   Madgwick filter integrates **gyro only** (no gravity correction) — useful to see
   whether accel noise/vibration is driving orientation jitter.
-- Telemetry shows the live **wrist-flex angle** (forearm vs hand frame).
+- **IMU test: On/Off** — hide the hand and show an **IMU-only** view for checking each
+  finger IMU: one row per IMU (labeled by mount — `idx-prox`, `mid-dist`, …, and the
+  **dorsum**) with a live **|accel|** (≈1.0 g at rest = wired), **|gyro|** (spikes when
+  you wiggle that finger), and a live/dead dot. An all-zero row is a dead/miswired IMU.
+  Mutually exclusive with Force test.
+- Telemetry shows the live **wrist-flex angle** (forearm vs hand frame) and flags any
+  IMU/BNO that is **streaming only zeros** (`!! NO DATA (zeros): …`) — a dead/miswired
+  sensor the firmware can't read.
 
 Force channels (firmware order): thumb `force0–3`, index `force4–7`, middle `force8–11`
 (2×2 each), **palm** `force12` center / `force13` thenar / `force14` hypothenar. `C15`

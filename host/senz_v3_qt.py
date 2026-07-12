@@ -597,6 +597,16 @@ class ControlPanel:
         self.forcetest_btn.clicked.connect(self._on_forcetest)
         lay.addWidget(self.forcetest_btn)
 
+        # IMU test: hide the hand and show every IMU's live accel/gyro, to check
+        # each finger IMU in isolation (mutually exclusive with the force test).
+        self._imutest = False
+        self._imutest_cb = None
+        self.imutest_btn = QtWidgets.QPushButton("IMU test: Off")
+        self.imutest_btn.setToolTip("Show only the IMUs (live accel/gyro) to check "
+                                    "each finger IMU")
+        self.imutest_btn.clicked.connect(self._on_imutest)
+        lay.addWidget(self.imutest_btn)
+
         # Accelerometer on/off: when off, the finger-IMU fusion integrates gyro only
         # (no gravity correction) -- useful to isolate accel noise / drift.
         self._accel = True
@@ -757,12 +767,31 @@ class ControlPanel:
     def set_forcetest_callback(self, cb):
         self._forcetest_cb = cb
 
+    def set_imutest_callback(self, cb):
+        self._imutest_cb = cb
+
     def _on_forcetest(self):
         self._forcetest = not getattr(self, "_forcetest", False)
         self.forcetest_btn.setText(
             f"Force test: {'On' if self._forcetest else 'Off'}")
         if getattr(self, "_forcetest_cb", None):
             self._forcetest_cb(self._forcetest)
+
+    def _on_imutest(self):
+        self._imutest = not getattr(self, "_imutest", False)
+        self.imutest_btn.setText(f"IMU test: {'On' if self._imutest else 'Off'}")
+        if getattr(self, "_imutest_cb", None):
+            self._imutest_cb(self._imutest)
+
+    def set_forcetest_off(self):
+        """Programmatically clear the force-test toggle (keeps the two views
+        mutually exclusive) without firing its callback."""
+        self._forcetest = False
+        self.forcetest_btn.setText("Force test: Off")
+
+    def set_imutest_off(self):
+        self._imutest = False
+        self.imutest_btn.setText("IMU test: Off")
 
 
 # ----------------------------------------------------------------------------
@@ -987,6 +1016,100 @@ class ForceTestPanel:
 
 
 # ----------------------------------------------------------------------------
+# IMU-only test view
+# ----------------------------------------------------------------------------
+class ImuTestPanel:
+    """An IMU-ONLY diagnostic view (no hand) for checking each finger IMU.
+
+    One live row per IMU: a dead / miswired IMU streams all zeros (|accel| = 0);
+    a live one always reads ~1 g of gravity even at rest, and its |gyro| spikes
+    when you wiggle that finger. Rows are labeled by mount (idx-prox, mid-dist,
+    ...) and the dorsum (the last IMU, which orients the whole hand) is marked."""
+
+    _OK = "#3fbf5f"
+    _FLAT = "#7a7f88"
+    _BAR = ("QProgressBar { background: #2c3036; border: 1px solid #4a4f57; }"
+            "QProgressBar::chunk { background: #4a90d9; }")
+
+    def __init__(self, n_imu, labels, dorsum_index=None):
+        from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
+
+        self.n = n_imu
+        panel = QtWidgets.QWidget()
+        panel.setObjectName("imutest")
+        lay = QtWidgets.QVBoxLayout(panel)
+        lay.addWidget(QtWidgets.QLabel(
+            "<b>IMU test</b> &mdash; wiggle each finger. <b>|accel|&nbsp;~1.0&nbsp;g</b> "
+            "at rest means the IMU is wired; <b>|gyro|</b> spikes when you move that "
+            "finger. An all-zero row is a dead / miswired IMU. The <b>dorsum</b> "
+            "orients the whole hand, so if it's dead nothing moves."))
+
+        grid = QtWidgets.QGridLayout()
+        grid.setHorizontalSpacing(10)
+        for c, h in enumerate(("#", "mount", "live", "|accel| g", "|gyro| dps",
+                               "motion")):
+            grid.addWidget(QtWidgets.QLabel(f"<b>{h}</b>"), 0, c)
+
+        mono = QtGui.QFont("Courier New", 10)
+        self.dots, self.acc_lbls, self.gyr_lbls, self.bars = [], [], [], []
+        for k in range(n_imu):
+            r = k + 1
+            grid.addWidget(QtWidgets.QLabel(str(k)), r, 0)
+            name = labels[k] if k < len(labels) else f"imu{k}"
+            if dorsum_index is not None and k == dorsum_index:
+                name += "  (dorsum)"
+            grid.addWidget(QtWidgets.QLabel(name), r, 1)
+
+            dot = QtWidgets.QLabel("●")
+            dot.setStyleSheet(f"color: {self._FLAT};")
+            grid.addWidget(dot, r, 2)
+
+            acc = QtWidgets.QLabel("-.--"); acc.setFont(mono); acc.setMinimumWidth(56)
+            acc.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            gyr = QtWidgets.QLabel("---"); gyr.setFont(mono); gyr.setMinimumWidth(56)
+            gyr.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            grid.addWidget(acc, r, 3)
+            grid.addWidget(gyr, r, 4)
+
+            bar = QtWidgets.QProgressBar()
+            bar.setRange(0, 500)              # deg/s; a brisk finger flick ~200-400
+            bar.setTextVisible(False)
+            bar.setFixedSize(180, 16)
+            bar.setStyleSheet(self._BAR)
+            grid.addWidget(bar, r, 5)
+
+            self.dots.append(dot); self.acc_lbls.append(acc)
+            self.gyr_lbls.append(gyr); self.bars.append(bar)
+
+        lay.addLayout(grid)
+        self.summary = QtWidgets.QLabel()
+        self.summary.setFont(mono)
+        lay.addWidget(self.summary)
+        lay.addStretch(1)
+        self.widget = panel
+
+    def update(self, accels, gyros, alive):
+        """accels/gyros: lists of per-IMU (x,y,z) in g / deg-per-s; alive: bool list
+        (latched once an IMU has shown gravity)."""
+        live = 0
+        for k in range(self.n):
+            if k >= len(accels):
+                continue
+            ax, ay, az = accels[k]
+            gx, gy, gz = gyros[k]
+            amag = math.sqrt(ax * ax + ay * ay + az * az)
+            gmag = math.sqrt(gx * gx + gy * gy + gz * gz)
+            self.acc_lbls[k].setText(f"{amag:.2f}")
+            self.gyr_lbls[k].setText(f"{gmag:.0f}")
+            self.bars[k].setValue(int(max(0, min(500, gmag))))
+            ok = alive[k] if k < len(alive) else (amag > 0.1)
+            if ok:
+                live += 1
+            self.dots[k].setStyleSheet(f"color: {self._OK if ok else self._FLAT};")
+        self.summary.setText(f"{live}/{self.n} IMUs live (saw >0.1 g of gravity)")
+
+
+# ----------------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------------
 def _wrist_quat(frame):
@@ -1112,6 +1235,14 @@ def main():
     force_test.widget.hide()
     root.insertWidget(1, force_test.widget, stretch=3)
 
+    # IMU-only test view (hidden until toggled): per-IMU live accel/gyro to check
+    # each finger IMU. Labels are the IMU mounts (sensor 0 is the wrist BNO); the
+    # dorsum is the last IMU (index n_imu-1 within the IMU set).
+    imu_test = ImuTestPanel(n_imu, sensor_labels[1:1 + n_imu],
+                            dorsum_index=n_imu - 1 if n_imu else None)
+    imu_test.widget.hide()
+    root.insertWidget(2, imu_test.widget, stretch=3)
+
     # Optional camera fusion: the tracker runs its own thread and exposes the
     # latest world landmarks; when present the fingers articulate from the camera
     # while the dorsum IMU keeps supplying orientation (see compute_skeleton).
@@ -1143,20 +1274,35 @@ def main():
             pass
         ctrl.widget.setStyleSheet(th["qss"])
         force_test.widget.setStyleSheet(th["qss"])
+        imu_test.widget.setStyleSheet(th["qss"])
         win.setStyleSheet(f'QWidget#senzmain {{ background-color: {th["win_bg"]}; }}')
 
     ctrl.set_theme_callback(apply_theme)
     ctrl.set_style_callback(hand.set_style)
     ctrl.set_accel_callback(lambda on: state.__setitem__("accel", on))
 
+    def _refresh_views():
+        # Show the 3D hand unless a diagnostic (force/IMU) view is up; tick() reads
+        # the state flags to feed the active panel and skip the hand render.
+        diag = state.get("forcetest") or state.get("imutest")
+        view.setVisible(not diag)
+        force_test.widget.setVisible(bool(state.get("forcetest")))
+        imu_test.widget.setVisible(bool(state.get("imutest")))
+
     def set_forcetest(on):
-        # Swap the 3D hand for the force-only bars (and back). tick() reads this
-        # flag to skip the hand render while the test view is up.
+        if on:                                   # the two diagnostic views are exclusive
+            ctrl.set_imutest_off(); state["imutest"] = False
         state["forcetest"] = on
-        view.setVisible(not on)
-        force_test.widget.setVisible(on)
+        _refresh_views()
+
+    def set_imutest(on):
+        if on:
+            ctrl.set_forcetest_off(); state["forcetest"] = False
+        state["imutest"] = on
+        _refresh_views()
 
     ctrl.set_forcetest_callback(set_forcetest)
+    ctrl.set_imutest_callback(set_imutest)
     apply_theme("dark")
 
     def tick():
@@ -1171,11 +1317,14 @@ def main():
         state["prev_t"] = t_us
 
         raw_quats = [_wrist_quat(frame)]
+        accels, gyros = [], []
         d2r = math.pi / 180.0
         use_accel = state.get("accel", True)
         for k in range(n_imu):
             ax, ay, az = mio.imu_accel_g(frame, k)
             gx, gy, gz = mio.imu_gyro_dps(frame, k)
+            accels.append((ax, ay, az))
+            gyros.append((gx, gy, gz))
             if abs(ax) + abs(ay) + abs(az) > 0.1:   # a live IMU always sees ~1g
                 state["imu_alive"][k] = True
             if not use_accel:
@@ -1186,6 +1335,11 @@ def main():
         if sum(abs(frame.get(q, 0.0)) for q in
                ("bno_qw", "bno_qx", "bno_qy", "bno_qz")) > 1e-6:
             state["bno_alive"] = True
+
+        # IMU-only test mode: drive the per-IMU accel/gyro readout, skip the hand.
+        if state.get("imutest"):
+            imu_test.update(accels, gyros, state["imu_alive"])
+            return
 
         fp = process_frame(frame, forces, fcfg)
         ctrl.update_force(fp)
