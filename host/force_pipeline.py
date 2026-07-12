@@ -96,6 +96,73 @@ class ForceArray:
     def update(self, raws):
         return [ch.update(r) for ch, r in zip(self.channels, raws)]
 
+    def reset(self, indices=None):
+        """Re-zero (re-baseline) the given channels -- all of them if ``indices`` is
+        None. Clearing ``baseline`` to None makes the next sample re-seed the open
+        (no-contact) level, and clearing ``span`` makes relative_grip re-learn its
+        scale. This is the "set force to 0 / calibrate" primitive: hold the hand
+        open and call it, and every channel takes the current reading as its zero.
+        """
+        idx = range(len(self.channels)) if indices is None else indices
+        for i in idx:
+            if 0 <= i < len(self.channels):
+                ch = self.channels[i]
+                ch.baseline = None     # re-seed on the next sample
+                ch.value = 0.0
+                ch.span = 1e-6
+
+
+class ForceConfig:
+    """Per-channel enable + source remap for the velostat array (pure Python,
+    headless-testable) -- the force-side analogue of the IMU SensorConfigV3.
+
+    - ``enabled[m]``: deactivate a broken/disconnected pad so it no longer drives
+      grip/contact (its processed output goes neutral). The raw ADC is still passed
+      through, so the force-test view can still show what a "broken" pad reads.
+    - ``source[m]``: logical channel ``m`` takes its raw ADC from physical channel
+      ``source[m]``. Lets you re-designate a mis-wired finger's pads -- e.g. an array
+      that came back with a finger's four pads in reverse order -- without touching
+      firmware or re-soldering.
+    """
+
+    def __init__(self, n):
+        self.n = n
+        self.enabled = [True] * n
+        self.source = list(range(n))   # identity: logical m <- physical m
+
+    def set_enabled(self, m, on):
+        self.enabled[m] = bool(on)
+
+    def set_source(self, m, raw):
+        """Route logical channel ``m`` to physical channel ``raw`` (validated)."""
+        if 0 <= m < self.n and 0 <= raw < self.n:
+            self.source[m] = raw
+
+    def swap(self, a, b):
+        """Swap two logical channels' physical sources (fix a transposed pair)."""
+        if 0 <= a < self.n and 0 <= b < self.n:
+            self.source[a], self.source[b] = self.source[b], self.source[a]
+
+    def reset(self):
+        """Back to identity routing with every channel enabled."""
+        self.source = list(range(self.n))
+        self.enabled = [True] * self.n
+
+    def route(self, raws):
+        """Reorder a physical raw list so output index ``m`` holds ``source[m]``."""
+        return [raws[self.source[m]] if 0 <= self.source[m] < len(raws) else 0
+                for m in range(self.n)]
+
+    _NEUTRAL = {"grip": 0.0, "above_baseline": 0.0, "relative_grip": 0.0,
+                "contact": False, "disabled": True}
+
+    def mask(self, results):
+        """Neutralize disabled channels' processed output (raw is preserved)."""
+        for m in range(min(self.n, len(results))):
+            if not self.enabled[m]:
+                results[m] = {**results[m], **self._NEUTRAL}
+        return results
+
 
 def _ema_alpha(tau_s, rate_hz):
     """First-order EMA coefficient for a time constant tau at a sample rate."""
@@ -103,13 +170,21 @@ def _ema_alpha(tau_s, rate_hz):
     return dt / (tau_s + dt)
 
 
-def process_frame(frame, array):
+def process_frame(frame, array, cfg=None):
     """Update `array` from a parsed glove frame; return per-region results.
 
-    Expects force columns named force0..forceN-1 (see senz_multi_io).
+    Expects force columns named force0..forceN-1 (see senz_multi_io). When a
+    ``ForceConfig`` is given, physical channels are first routed to their logical
+    positions (source remap) and disabled channels are neutralized afterward; each
+    result still carries the physical ``raw`` count it was fed.
     """
     raws = [frame[f"force{m}"] for m in range(len(array.channels))]
-    return array.update(raws)
+    if cfg is not None:
+        raws = cfg.route(raws)
+    out = array.update(raws)
+    if cfg is not None:
+        out = cfg.mask(out)
+    return out
 
 
 if __name__ == "__main__":

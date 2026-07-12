@@ -379,12 +379,22 @@ python senz_v3_sim.py                 # prints a few synthetic frames
   undoes it. **Zero force** — re-baseline the velostat taxels.
 - **Style: Noodle/Low-poly** — swap the smooth cylinder+sphere hand for a blocky
   low-poly one (~30× fewer triangles) when fps is tight.
-- **Force test: On/Off** — hide the hand and show a **force-sensors-only** view:
-  one live bar per velostat channel showing the **raw ADC count** (0–4095), the
-  min/max seen, and a touch dot. Press each pad in turn — a bar that moves (min≠max)
-  is a wired, working channel; a flat bar is a dead/disconnected pad. It reports raw
-  counts on purpose, since the normal `relative_grip` is auto-scaled and can look
-  alive even when a pad isn't. **Reset min/max** clears the spread to re-test.
+- **Force test: On/Off** — hide the hand and show a **force-sensors-only** view for
+  testing **and calibrating** the velostat array. One live row per channel shows the
+  **raw ADC count** (0–4095), a bar, the min/max seen, and a touch dot. Press each
+  pad in turn — a bar that moves (min≠max) is a wired, working channel; a flat bar is
+  a dead/disconnected pad. It reports raw counts on purpose, since the normal
+  `relative_grip` is auto-scaled and can look alive even when a pad isn't. Per-row
+  calibration controls:
+  - **on** checkbox — **deactivate a broken pad** (e.g. a dead thumb pad) so it no
+    longer drives grip/contact; its raw bar still shows what it reads (dimmed).
+  - **src** spinbox — **re-designate which physical channel feeds this pad**, for a
+    finger whose array came back mis-wired/reversed, without re-soldering. Changing
+    it re-zeros that channel.
+  - **0** button — **zero/re-baseline just that channel**.
+  - **Zero all (calibrate)** — hold the hand open, click: every channel takes its
+    current reading as zero. **Reset min/max** clears the spread; **Reset order**
+    restores identity routing and re-enables all pads.
 - Telemetry shows the live **wrist-flex angle** (forearm vs hand frame).
 
 Force channels (firmware order): thumb `force0–3`, index `force4–7`, middle `force8–11`

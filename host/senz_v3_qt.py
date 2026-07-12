@@ -750,21 +750,38 @@ class ControlPanel:
 # Force-only test view
 # ----------------------------------------------------------------------------
 class ForceTestPanel:
-    """A force-sensors-ONLY diagnostic view (no hand): one live row per velostat
-    channel so you can press each pad and confirm it responds. It shows the RAW
-    ADC count (0..4095) -- the honest "is this wired?" signal, since a dead or
-    disconnected pad reads flat while the auto-scaled relative_grip can still look
-    alive -- plus a live bar, the min/max seen so far (a stuck channel has
-    min==max), and a contact dot that lights when the pad is pressed."""
+    """A force-sensors-ONLY diagnostic + calibration view (no hand): one live row
+    per velostat channel so you can press each pad and confirm it responds. It shows
+    the RAW ADC count (0..4095) -- the honest "is this wired?" signal, since a dead
+    or disconnected pad reads flat while the auto-scaled relative_grip can still look
+    alive -- plus a live bar, the min/max seen so far (a stuck channel has min==max),
+    and a contact dot that lights when the pad is pressed.
 
-    # Bar color by health: gray until a channel has shown any spread, then green.
+    Per channel it also carries the calibration controls the array needs in the
+    field (all backed by a shared ``ForceConfig`` + ``on_zero`` callback):
+      - **on** checkbox: deactivate a broken pad (e.g. a dead thumb pad) so it stops
+        driving grip/contact -- the raw bar still shows what it reads.
+      - **src** spinbox: re-designate which physical channel feeds this logical pad,
+        for when a finger's array came back mis-wired/reversed. Changing it re-zeros
+        that channel.
+      - **0** button: zero/re-baseline just this channel.
+    Plus **Zero all** (calibrate: hold the hand open and click) and **Reset order**
+    (identity routing, all enabled)."""
+
+    # Bar color by state: gray (flat), green (responded), dim (deactivated).
     _OK = "#3fbf5f"
     _FLAT = "#7a7f88"
+    _OFF = "#4a4d54"
 
-    def __init__(self, nforce, labels):
+    def __init__(self, nforce, labels, cfg=None, on_zero=None):
         from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
+        from force_pipeline import ForceConfig
 
         self.n = nforce
+        self.labels = list(labels)
+        self.cfg = cfg if cfg is not None else ForceConfig(nforce)
+        # on_zero(indices|None) re-baselines the array; no-op if not wired.
+        self._on_zero = on_zero or (lambda idx=None: None)
         self.seen_min = [None] * nforce
         self.seen_max = [None] * nforce
 
@@ -772,46 +789,70 @@ class ForceTestPanel:
         panel.setObjectName("forcetest")
         lay = QtWidgets.QVBoxLayout(panel)
         lay.addWidget(QtWidgets.QLabel(
-            "<b>Force sensor test</b> &mdash; press each pad in turn. A bar that "
-            "moves (and a min&ne;max spread) means that channel is wired and "
-            "working; a flat bar is a dead or disconnected pad."))
+            "<b>Force sensor test &amp; calibration</b> &mdash; press each pad in "
+            "turn. A bar that moves (min&ne;max) means the channel is wired; a flat "
+            "bar is a dead/disconnected pad. Untick <b>on</b> to disable a broken "
+            "pad; change <b>src</b> to re-map a mis-wired finger; <b>0</b> zeroes a "
+            "channel."))
 
         grid = QtWidgets.QGridLayout()
-        grid.setHorizontalSpacing(10)
-        headers = ("#", "channel", "raw", "level (0..4095)", "min", "max", "touch")
+        grid.setHorizontalSpacing(8)
+        headers = ("#", "channel", "on", "src", "raw", "level (0..4095)",
+                   "min", "max", "touch", "")
         for col, h in enumerate(headers):
             grid.addWidget(QtWidgets.QLabel(f"<b>{h}</b>"), 0, col)
 
         mono = QtGui.QFont("Courier New", 10)
         self.bars, self.raw_lbls = [], []
         self.min_lbls, self.max_lbls, self.dots = [], [], []
+        self.enable_cbs, self.src_spins = [], []
         for m in range(nforce):
             r = m + 1
             grid.addWidget(QtWidgets.QLabel(str(m)), r, 0)
             grid.addWidget(QtWidgets.QLabel(labels[m]), r, 1)
 
+            en = QtWidgets.QCheckBox()
+            en.setChecked(self.cfg.enabled[m])
+            en.stateChanged.connect(lambda _s, i=m: self._on_enable(i))
+            grid.addWidget(en, r, 2)
+
+            spin = QtWidgets.QSpinBox()
+            spin.setRange(0, nforce - 1)
+            spin.setValue(self.cfg.source[m])
+            spin.setFixedWidth(48)
+            spin.setToolTip("physical channel that feeds this pad")
+            spin.valueChanged.connect(lambda v, i=m: self._on_src(i, v))
+            grid.addWidget(spin, r, 3)
+
             raw = QtWidgets.QLabel("----"); raw.setFont(mono)
             raw.setMinimumWidth(48)
             raw.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-            grid.addWidget(raw, r, 2)
+            grid.addWidget(raw, r, 4)
 
             bar = QtWidgets.QProgressBar()
             bar.setRange(0, 4095)
             bar.setTextVisible(False)
-            bar.setFixedSize(200, 16)
-            grid.addWidget(bar, r, 3)
+            bar.setFixedSize(190, 16)
+            grid.addWidget(bar, r, 5)
 
             lo = QtWidgets.QLabel("-"); lo.setFont(mono)
             hi = QtWidgets.QLabel("-"); hi.setFont(mono)
-            grid.addWidget(lo, r, 4)
-            grid.addWidget(hi, r, 5)
+            grid.addWidget(lo, r, 6)
+            grid.addWidget(hi, r, 7)
 
             dot = QtWidgets.QLabel("●")   # filled circle
             dot.setStyleSheet(f"color: {self._FLAT};")
-            grid.addWidget(dot, r, 6)
+            grid.addWidget(dot, r, 8)
+
+            zb = QtWidgets.QPushButton("0")
+            zb.setFixedWidth(28)
+            zb.setToolTip("zero / re-baseline this channel")
+            zb.clicked.connect(lambda _c, i=m: self._zero_channel(i))
+            grid.addWidget(zb, r, 9)
 
             self.bars.append(bar); self.raw_lbls.append(raw)
             self.min_lbls.append(lo); self.max_lbls.append(hi); self.dots.append(dot)
+            self.enable_cbs.append(en); self.src_spins.append(spin)
 
         lay.addLayout(grid)
         self.summary = QtWidgets.QLabel()
@@ -819,11 +860,54 @@ class ForceTestPanel:
         lay.addWidget(self.summary)
         lay.addStretch(1)
 
-        reset = QtWidgets.QPushButton("Reset min/max")
-        reset.clicked.connect(self.reset_ranges)
-        lay.addWidget(reset)
+        btns = QtWidgets.QHBoxLayout()
+        zero_all = QtWidgets.QPushButton("Zero all (calibrate)")
+        zero_all.setToolTip("Hold the hand open, then click: every channel takes "
+                            "its current reading as zero")
+        zero_all.clicked.connect(self._zero_all)
+        rng = QtWidgets.QPushButton("Reset min/max")
+        rng.clicked.connect(self.reset_ranges)
+        order = QtWidgets.QPushButton("Reset order")
+        order.setToolTip("Restore identity channel routing and re-enable all pads")
+        order.clicked.connect(self._reset_order)
+        for b in (zero_all, rng, order):
+            btns.addWidget(b)
+        lay.addLayout(btns)
 
         self.widget = panel
+
+    # -- calibration handlers -------------------------------------------------
+    def _on_enable(self, m):
+        self.cfg.set_enabled(m, self.enable_cbs[m].isChecked())
+
+    def _on_src(self, m, v):
+        self.cfg.set_source(m, v)
+        self._reset_channel_range(m)
+        self._on_zero([m])       # its baseline was learned from the old pad
+
+    def _zero_channel(self, m):
+        self._reset_channel_range(m)
+        self._on_zero([m])
+
+    def _zero_all(self):
+        self.reset_ranges()
+        self._on_zero(None)
+
+    def _reset_order(self):
+        self.cfg.reset()
+        for m in range(self.n):
+            self.src_spins[m].blockSignals(True)
+            self.src_spins[m].setValue(m)
+            self.src_spins[m].blockSignals(False)
+            self.enable_cbs[m].blockSignals(True)
+            self.enable_cbs[m].setChecked(True)
+            self.enable_cbs[m].blockSignals(False)
+        self.reset_ranges()
+        self._on_zero(None)
+
+    def _reset_channel_range(self, m):
+        self.seen_min[m] = self.seen_max[m] = None
+        self.min_lbls[m].setText("-"); self.max_lbls[m].setText("-")
 
     def reset_ranges(self):
         self.seen_min = [None] * self.n
@@ -831,20 +915,20 @@ class ForceTestPanel:
         for lo, hi in zip(self.min_lbls, self.max_lbls):
             lo.setText("-"); hi.setText("-")
 
-    def _bar_qss(self, ok):
-        col = self._OK if ok else self._FLAT
+    def _bar_qss(self, color):
         return ("QProgressBar { background: #2c3036; border: 1px solid #4a4f57; }"
-                f"QProgressBar::chunk {{ background: {col}; }}")
+                f"QProgressBar::chunk {{ background: {color}; }}")
 
     def update(self, fp):
         """Feed the processed force list (each dict carries 'raw' + 'contact')."""
         if not fp:
             return
-        alive = 0
+        alive = active = 0
         for m in range(self.n):
             if m >= len(fp):
                 continue
-            raw = int(fp[m].get("raw", 0))
+            on = self.cfg.enabled[m]
+            raw = int(fp[m].get("raw", 0))       # raw shown even when deactivated
             self.bars[m].setValue(max(0, min(4095, raw)))
             self.raw_lbls[m].setText(str(raw))
             lo = raw if self.seen_min[m] is None else min(self.seen_min[m], raw)
@@ -853,14 +937,23 @@ class ForceTestPanel:
             self.min_lbls[m].setText(str(lo))
             self.max_lbls[m].setText(str(hi))
             # "Working" = it has moved by more than ADC noise since we started.
-            ok = (hi - lo) > 25
-            if ok:
+            responded = (hi - lo) > 25
+            if not on:
+                self.bars[m].setStyleSheet(self._bar_qss(self._OFF))
+                self.dots[m].setStyleSheet(f"color: {self._OFF};")
+                continue
+            active += 1
+            if responded:
                 alive += 1
-            self.bars[m].setStyleSheet(self._bar_qss(ok))
+            self.bars[m].setStyleSheet(
+                self._bar_qss(self._OK if responded else self._FLAT))
             self.dots[m].setStyleSheet(
                 f"color: {self._OK if fp[m].get('contact') else self._FLAT};")
+        off = self.n - active
+        note = f"   ({off} deactivated)" if off else ""
         self.summary.setText(
-            f"{alive}/{self.n} channels have responded (moved > 25 counts)")
+            f"{alive}/{active} active channels have responded "
+            f"(moved > 25 counts){note}")
 
 
 # ----------------------------------------------------------------------------
@@ -883,7 +976,7 @@ def main():
     import senz_multi_io as mio
     import pinch as pinchmod
     from fusion.madgwick import MadgwickAHRS
-    from force_pipeline import ForceArray, process_frame
+    from force_pipeline import ForceArray, ForceConfig, process_frame
 
     ap = argparse.ArgumentParser(description="senz v3 native GPU hand visualizer")
     ap.add_argument("--port", help="serial port, e.g. COM5")
@@ -950,6 +1043,7 @@ def main():
     cfg = SensorConfigV3(1 + n_imu)
     filters = [MadgwickAHRS(beta=args.beta) for _ in range(n_imu)]
     forces = ForceArray(schema.nforce, rate=schema.rate or 200)
+    fcfg = ForceConfig(schema.nforce)   # per-channel enable + source remap
     state = {"prev_t": None, "fps": 0.0, "tlast": None, "raw_quats": None}
 
     app = QtWidgets.QApplication(sys.argv)
@@ -971,9 +1065,15 @@ def main():
     hand = HandGL(view, palm, fingers=active_fingers)
     root.addWidget(view, stretch=3)
 
-    # Force-only test view (hidden until toggled): the same live force data as
-    # bare raw-ADC bars, one per channel, so you can verify the sensors alone.
-    force_test = ForceTestPanel(schema.nforce, force_channel_labels(schema.nforce))
+    def zero_force(indices=None):
+        # Re-baseline the force array: all channels (None) or a subset. Used by the
+        # panel's per-channel "0" / "Zero all" and the control panel's Zero force.
+        forces.reset(indices)
+
+    # Force-only test + calibration view (hidden until toggled): raw-ADC bars per
+    # channel plus enable / source-remap / zero controls, sharing fcfg + zero_force.
+    force_test = ForceTestPanel(schema.nforce, force_channel_labels(schema.nforce),
+                                cfg=fcfg, on_zero=zero_force)
     force_test.widget.hide()
     root.insertWidget(1, force_test.widget, stretch=3)
 
@@ -992,10 +1092,7 @@ def main():
             print(f"camera fusion unavailable ({e}); IMU-only")
             tracker = None
 
-    def zero_force():
-        forces.__init__(schema.nforce, rate=schema.rate or 200)
-
-    ctrl = ControlPanel(cfg, zero_force,
+    ctrl = ControlPanel(cfg, lambda: zero_force(None),
                         palm_channels=PALM_CHANNELS if has_palm else None,
                         sensor_labels=sensor_labels)
     ctrl.set_zero_callback(lambda: cfg.capture_zero(state["raw_quats"])
@@ -1046,7 +1143,7 @@ def main():
                                                ax, ay, az, dt))
         state["raw_quats"] = raw_quats
 
-        fp = process_frame(frame, forces)
+        fp = process_frame(frame, forces, fcfg)
         ctrl.update_force(fp)
 
         # Force-only test mode: just drive the raw-ADC bars, skip the 3D hand.
