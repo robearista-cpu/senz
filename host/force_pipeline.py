@@ -78,6 +78,7 @@ class ForceChannel:
         self.span = max(self.span, above)
         contact = above > self.contact_delta
         return {
+            "raw": raw,                 # the un-processed ADC count (force-test view)
             "resistance": r,
             "grip": self.value,
             "above_baseline": above,

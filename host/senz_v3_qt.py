@@ -128,6 +128,22 @@ THEMES = {
 FORCE_FINGERTIP = {"thumb": 4, "index": 8, "middle": 12}
 
 
+def force_channel_labels(nforce):
+    """Human names for every force channel, indexed 0..nforce-1. Fingers are 4-pad
+    2x2 groups (thumb C0-3, index C4-7, middle C8-11); the last three (C12-14) are
+    the palm taxels when present. Used by the force-test view so each live bar says
+    which pad it is."""
+    labels = [None] * nforce
+    for fname, base in FORCE_BASE.items():
+        for c in range(4):
+            if base + c < nforce:
+                labels[base + c] = f"{fname} pad {c}"
+    for name, ch, _ in _PALM_BASE:
+        if ch < nforce:
+            labels[ch] = name
+    return [lab if lab else f"force{m}" for m, lab in enumerate(labels)]
+
+
 def finger_imu_map(nimu):
     """Which sensor bends which finger joint, for builds that have finger IMUs.
 
@@ -571,6 +587,16 @@ class ControlPanel:
         self.style_btn.clicked.connect(self._on_style)
         lay.addWidget(self.style_btn)
 
+        # Force-only test view: hides the hand and shows every velostat channel as
+        # a live raw-ADC bar, so you can check the force sensors in isolation.
+        self._forcetest = False
+        self._forcetest_cb = None
+        self.forcetest_btn = QtWidgets.QPushButton("Force test: Off")
+        self.forcetest_btn.setToolTip("Show only the force sensors (raw ADC bars) "
+                                      "to verify each pad responds")
+        self.forcetest_btn.clicked.connect(self._on_forcetest)
+        lay.addWidget(self.forcetest_btn)
+
         lay.addWidget(QtWidgets.QLabel("<b>Sensor</b>"))
         self.sensor_box = QtWidgets.QComboBox()
         self.sensor_box.addItems(sensor_labels)
@@ -709,6 +735,133 @@ class ControlPanel:
     def set_info(self, text):
         self.info.setText(text)
 
+    def set_forcetest_callback(self, cb):
+        self._forcetest_cb = cb
+
+    def _on_forcetest(self):
+        self._forcetest = not getattr(self, "_forcetest", False)
+        self.forcetest_btn.setText(
+            f"Force test: {'On' if self._forcetest else 'Off'}")
+        if getattr(self, "_forcetest_cb", None):
+            self._forcetest_cb(self._forcetest)
+
+
+# ----------------------------------------------------------------------------
+# Force-only test view
+# ----------------------------------------------------------------------------
+class ForceTestPanel:
+    """A force-sensors-ONLY diagnostic view (no hand): one live row per velostat
+    channel so you can press each pad and confirm it responds. It shows the RAW
+    ADC count (0..4095) -- the honest "is this wired?" signal, since a dead or
+    disconnected pad reads flat while the auto-scaled relative_grip can still look
+    alive -- plus a live bar, the min/max seen so far (a stuck channel has
+    min==max), and a contact dot that lights when the pad is pressed."""
+
+    # Bar color by health: gray until a channel has shown any spread, then green.
+    _OK = "#3fbf5f"
+    _FLAT = "#7a7f88"
+
+    def __init__(self, nforce, labels):
+        from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
+
+        self.n = nforce
+        self.seen_min = [None] * nforce
+        self.seen_max = [None] * nforce
+
+        panel = QtWidgets.QWidget()
+        panel.setObjectName("forcetest")
+        lay = QtWidgets.QVBoxLayout(panel)
+        lay.addWidget(QtWidgets.QLabel(
+            "<b>Force sensor test</b> &mdash; press each pad in turn. A bar that "
+            "moves (and a min&ne;max spread) means that channel is wired and "
+            "working; a flat bar is a dead or disconnected pad."))
+
+        grid = QtWidgets.QGridLayout()
+        grid.setHorizontalSpacing(10)
+        headers = ("#", "channel", "raw", "level (0..4095)", "min", "max", "touch")
+        for col, h in enumerate(headers):
+            grid.addWidget(QtWidgets.QLabel(f"<b>{h}</b>"), 0, col)
+
+        mono = QtGui.QFont("Courier New", 10)
+        self.bars, self.raw_lbls = [], []
+        self.min_lbls, self.max_lbls, self.dots = [], [], []
+        for m in range(nforce):
+            r = m + 1
+            grid.addWidget(QtWidgets.QLabel(str(m)), r, 0)
+            grid.addWidget(QtWidgets.QLabel(labels[m]), r, 1)
+
+            raw = QtWidgets.QLabel("----"); raw.setFont(mono)
+            raw.setMinimumWidth(48)
+            raw.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            grid.addWidget(raw, r, 2)
+
+            bar = QtWidgets.QProgressBar()
+            bar.setRange(0, 4095)
+            bar.setTextVisible(False)
+            bar.setFixedSize(200, 16)
+            grid.addWidget(bar, r, 3)
+
+            lo = QtWidgets.QLabel("-"); lo.setFont(mono)
+            hi = QtWidgets.QLabel("-"); hi.setFont(mono)
+            grid.addWidget(lo, r, 4)
+            grid.addWidget(hi, r, 5)
+
+            dot = QtWidgets.QLabel("●")   # filled circle
+            dot.setStyleSheet(f"color: {self._FLAT};")
+            grid.addWidget(dot, r, 6)
+
+            self.bars.append(bar); self.raw_lbls.append(raw)
+            self.min_lbls.append(lo); self.max_lbls.append(hi); self.dots.append(dot)
+
+        lay.addLayout(grid)
+        self.summary = QtWidgets.QLabel()
+        self.summary.setFont(mono)
+        lay.addWidget(self.summary)
+        lay.addStretch(1)
+
+        reset = QtWidgets.QPushButton("Reset min/max")
+        reset.clicked.connect(self.reset_ranges)
+        lay.addWidget(reset)
+
+        self.widget = panel
+
+    def reset_ranges(self):
+        self.seen_min = [None] * self.n
+        self.seen_max = [None] * self.n
+        for lo, hi in zip(self.min_lbls, self.max_lbls):
+            lo.setText("-"); hi.setText("-")
+
+    def _bar_qss(self, ok):
+        col = self._OK if ok else self._FLAT
+        return ("QProgressBar { background: #2c3036; border: 1px solid #4a4f57; }"
+                f"QProgressBar::chunk {{ background: {col}; }}")
+
+    def update(self, fp):
+        """Feed the processed force list (each dict carries 'raw' + 'contact')."""
+        if not fp:
+            return
+        alive = 0
+        for m in range(self.n):
+            if m >= len(fp):
+                continue
+            raw = int(fp[m].get("raw", 0))
+            self.bars[m].setValue(max(0, min(4095, raw)))
+            self.raw_lbls[m].setText(str(raw))
+            lo = raw if self.seen_min[m] is None else min(self.seen_min[m], raw)
+            hi = raw if self.seen_max[m] is None else max(self.seen_max[m], raw)
+            self.seen_min[m], self.seen_max[m] = lo, hi
+            self.min_lbls[m].setText(str(lo))
+            self.max_lbls[m].setText(str(hi))
+            # "Working" = it has moved by more than ADC noise since we started.
+            ok = (hi - lo) > 25
+            if ok:
+                alive += 1
+            self.bars[m].setStyleSheet(self._bar_qss(ok))
+            self.dots[m].setStyleSheet(
+                f"color: {self._OK if fp[m].get('contact') else self._FLAT};")
+        self.summary.setText(
+            f"{alive}/{self.n} channels have responded (moved > 25 counts)")
+
 
 # ----------------------------------------------------------------------------
 # Main
@@ -818,6 +971,12 @@ def main():
     hand = HandGL(view, palm, fingers=active_fingers)
     root.addWidget(view, stretch=3)
 
+    # Force-only test view (hidden until toggled): the same live force data as
+    # bare raw-ADC bars, one per channel, so you can verify the sensors alone.
+    force_test = ForceTestPanel(schema.nforce, force_channel_labels(schema.nforce))
+    force_test.widget.hide()
+    root.insertWidget(1, force_test.widget, stretch=3)
+
     # Optional camera fusion: the tracker runs its own thread and exposes the
     # latest world landmarks; when present the fingers articulate from the camera
     # while the dorsum IMU keeps supplying orientation (see compute_skeleton).
@@ -851,10 +1010,20 @@ def main():
         except Exception:
             pass
         ctrl.widget.setStyleSheet(th["qss"])
+        force_test.widget.setStyleSheet(th["qss"])
         win.setStyleSheet(f'QWidget#senzmain {{ background-color: {th["win_bg"]}; }}')
 
     ctrl.set_theme_callback(apply_theme)
     ctrl.set_style_callback(hand.set_style)
+
+    def set_forcetest(on):
+        # Swap the 3D hand for the force-only bars (and back). tick() reads this
+        # flag to skip the hand render while the test view is up.
+        state["forcetest"] = on
+        view.setVisible(not on)
+        force_test.widget.setVisible(on)
+
+    ctrl.set_forcetest_callback(set_forcetest)
     apply_theme("dark")
 
     def tick():
@@ -877,12 +1046,18 @@ def main():
                                                ax, ay, az, dt))
         state["raw_quats"] = raw_quats
 
+        fp = process_frame(frame, forces)
+        ctrl.update_force(fp)
+
+        # Force-only test mode: just drive the raw-ADC bars, skip the 3D hand.
+        if state.get("forcetest"):
+            force_test.update(fp)
+            return
+
         world = tracker.get_world() if tracker is not None else None
         skel = compute_skeleton(raw_quats, cfg, dorsum_sensor, args.hand,
                                 world_lms=world, imu_map=imu_map)
-        fp = process_frame(frame, forces)
         hand.update(skel, fp)
-        ctrl.update_force(fp)
 
         now = time.time()
         if state["tlast"] is not None:

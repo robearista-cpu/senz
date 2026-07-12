@@ -377,6 +377,14 @@ python senz_v3_sim.py                 # prints a few synthetic frames
   are accepted; duplicate axes are ignored.
 - **Zero hand** — tare the current pose as neutral (hold flat, click). **Clear zero**
   undoes it. **Zero force** — re-baseline the velostat taxels.
+- **Style: Noodle/Low-poly** — swap the smooth cylinder+sphere hand for a blocky
+  low-poly one (~30× fewer triangles) when fps is tight.
+- **Force test: On/Off** — hide the hand and show a **force-sensors-only** view:
+  one live bar per velostat channel showing the **raw ADC count** (0–4095), the
+  min/max seen, and a touch dot. Press each pad in turn — a bar that moves (min≠max)
+  is a wired, working channel; a flat bar is a dead/disconnected pad. It reports raw
+  counts on purpose, since the normal `relative_grip` is auto-scaled and can look
+  alive even when a pad isn't. **Reset min/max** clears the spread to re-test.
 - Telemetry shows the live **wrist-flex angle** (forearm vs hand frame).
 
 Force channels (firmware order): thumb `force0–3`, index `force4–7`, middle `force8–11`
