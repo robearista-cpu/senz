@@ -410,9 +410,13 @@ python senz_v3_sim.py                 # prints a few synthetic frames
   **dorsum**) with a live **|accel|** (≈1.0 g at rest = wired), **|gyro|** (spikes when
   you wiggle that finger), and a live/dead dot. An all-zero row is a dead/miswired IMU.
   Mutually exclusive with Force test.
-- Telemetry shows the live **wrist-flex angle** (forearm vs hand frame) and flags any
-  IMU/BNO that is **streaming only zeros** (`!! NO DATA (zeros): …`) — a dead/miswired
-  sensor the firmware can't read.
+- Telemetry shows the live **wrist-flex angle** (forearm vs hand frame). **Dead IMUs
+  auto-disable**: any IMU streaming only zeros (dead/miswired, so the firmware can't
+  read it) is automatically disabled after a short grace window, so its finger rests
+  neutral instead of flailing on a garbage pose and **the live IMUs keep tracking**.
+  The readout names them (`auto-disabled dead IMU: imu0,imu1,…`); fix the wiring and
+  they re-enable themselves on the next good reading. A dead BNO wrist is flagged
+  separately (`!! BNO wrist: NO DATA (zeros)`).
 
 Force channels (firmware order): thumb `force0–3`, index `force4–7`, middle `force8–11`
 (2×2 each), **palm** `force12` center / `force13` thenar / `force14` hypothenar. `C15`

@@ -742,6 +742,10 @@ class ControlPanel:
         if self._theme_cb:
             self._theme_cb(self._theme)
 
+    def refresh(self):
+        """Re-sync the widgets to cfg (e.g. after an auto enable/disable)."""
+        self._refresh_axis_widgets()
+
     def _refresh_axis_widgets(self):
         self.enable_cb.blockSignals(True)
         self.enable_cb.setChecked(self.cfg.enabled[self.active])
@@ -1202,7 +1206,13 @@ def main():
              # IMU health: a dead/miswired IMU streams zeros (firmware zeros absent
              # sensors), which pins its fusion at identity -> the hand won't orient.
              # Latch "alive" once a sensor shows real motion (gravity is always ~1g).
-             "imu_alive": [False] * n_imu, "bno_alive": False}
+             "imu_alive": [False] * n_imu, "bno_alive": False,
+             # Auto-disable dead IMUs: count consecutive zero-accel frames per IMU;
+             # once past the grace window, disable that sensor so its (garbage)
+             # identity pose stops driving its finger and the live IMUs keep working.
+             # `auto_off` holds the sensor indices WE disabled (so we only re-enable
+             # our own, never the user's manual disables).
+             "imu_zero_streak": [0] * n_imu, "auto_off": set()}
 
     app = QtWidgets.QApplication(sys.argv)
     win = QtWidgets.QWidget()
@@ -1336,6 +1346,28 @@ def main():
                ("bno_qw", "bno_qx", "bno_qy", "bno_qz")) > 1e-6:
             state["bno_alive"] = True
 
+        # Auto-disable dead IMUs so the live ones keep tracking. An IMU that streams
+        # zero accel for GRACE frames is disabled in cfg (sensor idx = k+1; sensor 0
+        # is the wrist); compute_skeleton then skips its finger (rests neutral)
+        # instead of bending it by the garbage identity pose. Re-enable on revival.
+        GRACE = 20
+        auto_off = state["auto_off"]
+        changed = False
+        for k in range(n_imu):
+            s = k + 1
+            amag = abs(accels[k][0]) + abs(accels[k][1]) + abs(accels[k][2])
+            if amag > 0.1:
+                state["imu_zero_streak"][k] = 0
+                if s in auto_off:                     # revived -> re-enable
+                    cfg.set_enabled(s, True); auto_off.discard(s); changed = True
+            else:
+                state["imu_zero_streak"][k] += 1
+                if state["imu_zero_streak"][k] >= GRACE and s not in auto_off \
+                        and cfg.enabled[s]:
+                    cfg.set_enabled(s, False); auto_off.add(s); changed = True
+        if changed:
+            ctrl.refresh()                            # reflect in the Enabled checkbox
+
         # IMU-only test mode: drive the per-IMU accel/gyro readout, skip the hand.
         if state.get("imutest"):
             imu_test.update(accels, gyros, state["imu_alive"])
@@ -1360,19 +1392,17 @@ def main():
         state["tlast"] = now
         lines = [f"fps ~ {state['fps']:5.1f}   dt {dt*1e3:4.1f} ms   hand={args.hand}",
                  f"drive: {skel['driven']}   wrist flex {skel['flex_deg']:5.1f} deg", ""]
-        # IMU health: name any sensor streaming only zeros (dead / miswired / not
-        # detected by the firmware). The dorsum is the LAST IMU and orients the hand,
-        # so if it's dead the hand won't move at all -- flag it prominently.
-        dead = [i for i, a in enumerate(state["imu_alive"]) if not a]
-        warn = []
+        # IMU health: dead IMUs (streaming zeros) are auto-disabled above so the live
+        # ones keep tracking; name them here (dorsum = last IMU) plus a dead BNO.
+        def _imu_name(sensor_idx):
+            k = sensor_idx - 1
+            return "dorsum" if k == n_imu - 1 else f"imu{k}"
+        auto = sorted(state["auto_off"])
+        if auto:
+            lines += ["auto-disabled dead IMU: " + ",".join(_imu_name(s) for s in auto),
+                      "   (live IMUs still tracking; fix wiring to restore)", ""]
         if n_imu and not state["bno_alive"]:
-            warn.append("BNO wrist")
-        if dead:
-            warn.append("IMU " + ",".join(
-                ("dorsum" if i == n_imu - 1 else f"imu{i}") for i in dead))
-        if warn:
-            lines += ["!! NO DATA (zeros): " + "; ".join(warn),
-                      "   check wiring / send '?' for firmware health", ""]
+            lines += ["!! BNO wrist: NO DATA (zeros) -- check wiring", ""]
         for c in ("thumb", "index", "middle"):
             b = FORCE_BASE[c]
             bars = " ".join(f"{fp[b+i]['relative_grip']:.2f}" for i in range(4))
