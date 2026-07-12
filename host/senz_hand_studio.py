@@ -117,26 +117,11 @@ def _grip_of(finger, fp):
     return float(np.mean(vals)) if vals else 0.0
 
 
-# --- low-poly box primitive (the "video-game hand" style) -------------------
-# 8 corners of a unit cube in [-0.5, 0.5]^3, ordered so the 12 triangles below
-# wind consistently. A blocky box per bone + palm = a simple low-poly hand.
-_BOX_CORNERS = np.array([(sx, sy, sz) for sx in (-1, 1) for sy in (-1, 1)
-                         for sz in (-1, 1)], dtype=float) * 0.5
-_BOX_FACES = np.array([
-    (0, 1, 3), (0, 3, 2),   # -x        corner index = (sx,sy,sz) bits, sx outer
-    (4, 6, 7), (4, 7, 5),   # +x
-    (0, 4, 5), (0, 5, 1),   # -y
-    (2, 3, 7), (2, 7, 6),   # +y
-    (0, 2, 6), (0, 6, 4),   # -z
-    (1, 5, 7), (1, 7, 3),   # +z
-], dtype=int)
-
-
-def oriented_box(center, R, half):
-    """8 verts + 12 faces of a box at ``center``, oriented by rotation ``R``, with
-    per-axis half-extents ``half``. Pure numpy (headless-testable)."""
-    verts = (np.asarray(R) @ (_BOX_CORNERS * np.asarray(half, dtype=float)).T).T
-    return verts + np.asarray(center, dtype=float), _BOX_FACES
+# Low-poly box primitive (the "video-game hand" style) lives in hand_model so both
+# visualizers share it; alias here for readability.
+_BOX_CORNERS = hmod.BOX_CORNERS
+_BOX_FACES = hmod.BOX_FACES
+oriented_box = hmod.oriented_box
 
 
 # ----------------------------------------------------------------------------

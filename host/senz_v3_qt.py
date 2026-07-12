@@ -435,6 +435,18 @@ class HandGL:
             view.addItem(jt)
             self.joints.append(jt)
 
+        # LOW-POLY style: one flat-shaded box per bone (12 tris vs a cylinder + two
+        # joint spheres) -- much cheaper to rebuild each frame, so it holds fps far
+        # better than the smooth "noodle" hand. Hidden until selected.
+        lp_kw = dict(smooth=False, shader="shaded", drawEdges=False, glOptions="opaque")
+        self.lp_bones = []
+        for a, b in self._conns:
+            col = hmod.connection_color(a, b) + (1.0,)
+            it = gl.GLMeshItem(vertexes=hmod.BOX_CORNERS, faces=hmod.BOX_FACES,
+                               color=col, **lp_kw)
+            view.addItem(it)
+            self.lp_bones.append(it)
+
         # Force patches: a 2x2 scatter at each active thumb/index/middle fingertip.
         self.force_pts = {}
         for name in FORCE_FINGERTIP:
@@ -450,6 +462,22 @@ class HandGL:
             self.palm_scatter = gl.GLScatterPlotItem(
                 pos=np.zeros((len(self.palm_taxels), 3)), size=0.001, pxMode=False)
             view.addItem(self.palm_scatter)
+
+        # Render style: "noodle" (smooth cylinders + spheres) or "lowpoly" (boxes).
+        self.style = "noodle"
+        self._apply_style()
+
+    def _apply_style(self):
+        noodle = self.style == "noodle"
+        for it in self.bones + self.joints:
+            it.setVisible(noodle)
+        for it in self.lp_bones:
+            it.setVisible(not noodle)
+
+    def set_style(self, style):
+        """'noodle' (smooth, prettier) or 'lowpoly' (blocky, cheaper -> higher fps)."""
+        self.style = "lowpoly" if style == "lowpoly" else "noodle"
+        self._apply_style()
 
     def _sphere_at(self, center, radius):
         return self._sv * radius + np.asarray(center)
@@ -469,11 +497,20 @@ class HandGL:
         self.forearm.setMeshData(vertexes=self._cylinder(wp, wp + Rf @ (-_EY * FOREARM_LEN)),
                                  faces=self._cf)
         self.wrist.setMeshData(vertexes=self._sphere_at(wp, WRIST_RADIUS), faces=self._sf)
-        for (a, b), it in zip(self._conns, self.bones):
-            it.setMeshData(vertexes=self._cylinder(pts[a], pts[b]), faces=self._cf)
-        for lm, jt in zip(self._lms, self.joints):
-            r = JOINT_RADIUS * (1.35 if lm in hmod.FINGERTIPS else 1.0)
-            jt.setMeshData(vertexes=self._sphere_at(pts[lm], r), faces=self._sf)
+        if self.style == "noodle":
+            for (a, b), it in zip(self._conns, self.bones):
+                it.setMeshData(vertexes=self._cylinder(pts[a], pts[b]), faces=self._cf)
+            for lm, jt in zip(self._lms, self.joints):
+                r = JOINT_RADIUS * (1.35 if lm in hmod.FINGERTIPS else 1.0)
+                jt.setMeshData(vertexes=self._sphere_at(pts[lm], r), faces=self._sf)
+        else:
+            for (a, b), it in zip(self._conns, self.lp_bones):
+                d = pts[b] - pts[a]
+                L = max(1e-6, float(np.linalg.norm(d)))
+                w = BONE_RADIUS * 1.5
+                verts, faces = hmod.oriented_box((pts[a] + pts[b]) * 0.5,
+                                                 align_z_to(d), (w, w, L * 0.5))
+                it.setMeshData(vertexes=verts, faces=faces)
         for name, sp in self.force_pts.items():
             self._force_patch(name, Rh, pts[FORCE_FINGERTIP[name]], fp)
         self._palm_patch(wp, Rh, fp)
@@ -525,6 +562,14 @@ class ControlPanel:
         self.theme_btn = QtWidgets.QPushButton("Theme: Dark")
         self.theme_btn.clicked.connect(self._on_theme)
         lay.addWidget(self.theme_btn)
+
+        # Render style: noodle (smooth, prettier) vs low-poly (blocky, higher fps).
+        self._style = "noodle"
+        self._style_cb = None
+        self.style_btn = QtWidgets.QPushButton("Style: Noodle")
+        self.style_btn.setToolTip("Switch to low-poly (blocky) for higher fps")
+        self.style_btn.clicked.connect(self._on_style)
+        lay.addWidget(self.style_btn)
 
         lay.addWidget(QtWidgets.QLabel("<b>Sensor</b>"))
         self.sensor_box = QtWidgets.QComboBox()
@@ -626,6 +671,15 @@ class ControlPanel:
 
     def set_theme_callback(self, cb):
         self._theme_cb = cb
+
+    def set_style_callback(self, cb):
+        self._style_cb = cb
+
+    def _on_style(self):
+        self._style = "lowpoly" if self._style == "noodle" else "noodle"
+        self.style_btn.setText(f"Style: {'Low-poly' if self._style == 'lowpoly' else 'Noodle'}")
+        if self._style_cb:
+            self._style_cb(self._style)
 
     def _on_theme(self):
         self._theme = "light" if self._theme == "dark" else "dark"
@@ -800,6 +854,7 @@ def main():
         win.setStyleSheet(f'QWidget#senzmain {{ background-color: {th["win_bg"]}; }}')
 
     ctrl.set_theme_callback(apply_theme)
+    ctrl.set_style_callback(hand.set_style)
     apply_theme("dark")
 
     def tick():

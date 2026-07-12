@@ -177,6 +177,30 @@ def active_connections(fingers):
     return [(a, b) for (a, b) in HAND_CONNECTIONS if a in s and b in s]
 
 
+# ----------------------------------------------------------------------------
+# Low-poly box primitive (the cheap "blocky" bone/palm style, shared by both
+# visualizers). 8 corners of a unit cube in [-0.5, 0.5]^3, 12 triangles.
+# ----------------------------------------------------------------------------
+BOX_CORNERS = np.array([(sx, sy, sz) for sx in (-1, 1) for sy in (-1, 1)
+                        for sz in (-1, 1)], dtype=float) * 0.5
+BOX_FACES = np.array([
+    (0, 1, 3), (0, 3, 2),   # -x   (corner index bits = sx,sy,sz, sx outermost)
+    (4, 6, 7), (4, 7, 5),   # +x
+    (0, 4, 5), (0, 5, 1),   # -y
+    (2, 3, 7), (2, 7, 6),   # +y
+    (0, 2, 6), (0, 6, 4),   # -z
+    (1, 5, 7), (1, 7, 3),   # +z
+], dtype=int)
+
+
+def oriented_box(center, R, half):
+    """8 verts + 12 faces of a box at ``center``, oriented by rotation ``R`` (3x3),
+    with per-axis half-extents ``half``. Pure numpy -- a cheap bone/palm primitive
+    (12 tris vs a cylinder+sphere) for the low-poly render style."""
+    verts = (np.asarray(R) @ (BOX_CORNERS * np.asarray(half, dtype=float)).T).T
+    return verts + np.asarray(center, dtype=float), BOX_FACES
+
+
 def bend_fingers(pts, bends):
     """Articulate a canonical hand from per-joint rotations (finger IMUs).
 
