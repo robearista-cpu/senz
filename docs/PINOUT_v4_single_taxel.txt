@@ -1,0 +1,132 @@
+================================================================================
+ SENZ GLOVE — v4 SINGLE-TAXEL build  PIN LAYOUT
+ Board: ESP32-S3-DevKitC-1        Sketch: firmware/senz_glove_v4_force/
+ HLD  : docs/senz_glove_hld_v4.md
+ Focus: ONE perfected velostat force taxel + a characterization bench.
+        No IMUs. No BNO. No SPI/I2C sensor buses. No mux. No array.
+================================================================================
+
+ All logic is 3.3V. NEVER connect 5V to any GPIO or to the faraday/common
+ electrode. Power in: 5V USB power bank -> 5V header pin -> onboard reg -> 3V3.
+
+ Sensor set (this build):
+   - force : 1x LARGE velostat taxel, read directly on one ADC pin.
+   That is the entire sensor set. Everything else from v3 is removed.
+
+--------------------------------------------------------------------------------
+ WHY SO EMPTY
+--------------------------------------------------------------------------------
+ v3 tried 8 IMUs (SPI) + BNO055 (I2C) + 12-15 taxels (mux) at once and the
+ wiring/bus complexity is what failed in the field (dead finger-IMU groups from
+ a shared SPI/CS/power fault; mis-wired/reversed velostat channels). v4 proves
+ the force primitive on ONE sensor before scaling back up. The mux is omitted on
+ purpose -- one taxel needs no channel select, and every removed part is one
+ fewer failure point.
+
+================================================================================
+ VELOSTAT TAXEL (x1) — construction stack
+================================================================================
+ Top to bottom (see HLD "Hardware" for the build note):
+
+   [ conductive fabric ]   top electrode          -> SIG wire
+   [ thinner compliant inlay ]  (NEW vs v3)        sets force->compression curve
+   [ velostat sheet ]      piezoresistive; R DROPS as pressure RISES
+   [ conductive fabric ]   bottom electrode        -> divider / GND side
+   [ faraday plane ]       shield                  -> 3V3
+
+ Build controls (lock these down, they are the sprint):
+   - repeatable pad geometry (die/template + calipers); constant area
+   - a THINNER, more compliant inlay than v3 (lower threshold, finer low-force)
+   - controlled pre-load + lamination so the "open" reading is stable
+   - polarity fixed ONCE and documented: top electrode = SIG, bottom = divider
+
+================================================================================
+ DIVIDER + ADC — the entire electrical interface
+================================================================================
+
+   3V3 --[ velostat taxel ]--+-- SIG ------> GPIO10  (ADC1_CH9)
+                             |
+                             +--[ Rseries ]-- GND        (divider resistor)
+                             +--[ 1..10 nF ]-- GND       (optional filter cap)
+
+   Vout = 3V3 * Rseries / (Rvelostat + Rseries)
+   Rvelostat = Rseries * (VREF/Vout - 1)
+
+ Rseries is MEASURED, not assumed (v3 mismatch: host hard-coded 10k, wiring said
+ 10k..22k). Procedure:
+   1. Measure the taxel R_open (no load) and R_pressed (firm press) with a meter.
+   2. Pick Rseries ~= sqrt(R_open * R_pressed)  (geometric mean = mid-scale swing,
+      maximum ADC sensitivity across the working range).
+   3. Fit that resistor; record the exact value here and set the host
+      force_pipeline.py `series_ohms` to match it (make it configurable).
+
+      Rseries actually installed:  __________ ohms   <-- FILL IN per sensor
+
+ FSR OPTION: the bought FSR (rated 0-500g) reads on the SAME SIG node with the
+ SAME wiring — it is a resistive sensor too. Only re-measure ITS R_open/R_pressed
+ and re-select its own Rseries (step above); its 0-500g range maps onto the test
+ jig's weight set. Velostat and FSR are swapped in/out at the pad; nothing else
+ changes.
+
+      FSR Rseries actually installed:  __________ ohms
+
+ IMPORTANT: use ADC1 (GPIO1..GPIO10) for SIG — NEVER ADC2. ADC2 stops working
+ when BLE/WiFi is on, and BLE is on the roadmap. GPIO10 is ADC1, so it's safe.
+
+   ESP32-S3 pin   ->  connection
+   ------------       ----------------------------------------------------
+   GPIO10 (ADC1_CH9)  SIG: velostat top electrode + Rseries to GND
+   3V3                faraday plane + divider high side (velostat top)
+   GND                Rseries low side + filter cap
+
+================================================================================
+ PIN USAGE SUMMARY / CONFLICT CHECK
+================================================================================
+   Velostat SIG (ADC1) : GPIO10
+   -> that's it. One ADC pin. No bus, no select lines, no CS.
+
+ FREED vs v3 (available for the roadmap): GPIO4, 5, 8, 9, 11, 12, 13, 14, 17,
+   18, 21, 38, 39, 40 (~14 pins). The ADS1115 upgrade uses I2C GPIO8/9; a future
+   CD74HC4067 (to scale back to an array) uses 4 select pins + keeps SIG on GPIO10.
+
+--------------------------------------------------------------------------------
+ ANALOG FRONT-END NOTES (firmware: senz_glove_v4_force.ino)
+--------------------------------------------------------------------------------
+ - analogReadResolution(12); ADC_11db attenuation (~0-3.3V), same as v3.
+ - SETTLE: the velostat+divider node is high-impedance; give the ADC sample cap
+   real charge time (tens of us, tuned on the bench). v3's 5-8 us was too short.
+   No mux here, so there is NO channel-switch crosstalk to fight.
+ - OVERSAMPLE + MEDIAN: a single taxel leaves almost the whole frame free; take
+   many reads and take the MEDIAN (rejects spikes), optionally average medians.
+ - LINEARIZE: apply esp_adc_cal / a measured ADC curve (ESP32 ADC is non-linear
+   near the rails).
+ - PLANNED: ADS1115 (16-bit, PGA, I2C on GPIO8/9) reads the SAME SIG node with no
+   rework -> better linearity/noise + cleaner absolute-force curve. Parts ordered.
+
+--------------------------------------------------------------------------------
+ WIRELESS
+--------------------------------------------------------------------------------
+ USB serial only this sprint. Firmware streams the self-describing CSV:
+   # senz-v4force nimu=0 nforce=1 rate=200
+   # columns: t_us,force0
+ BLE is deferred (needs the radio, which disables ADC2; force is on ADC1 so it
+ stays compatible for later). Reuse host/senz_ble_io.py when BLE is brought up.
+
+================================================================================
+ PHYSICAL PLACEMENT / MOUNTING
+================================================================================
+ TWO placements this sprint:
+
+  1. TEST JIG (characterization): the sensor sits under a flat platen and is
+     loaded with known masses (0-500g weight set) / a gram scale / a force gauge
+     and measured (host/force_characterize.py). This is where velostat and the
+     FSR are compared head-to-head.
+
+  2. FINGER CARAPACE (wearable, no glove): a per-finger TPU "fingertip cap" that
+     seats the sensor on the PALMAR PULP of one distal phalanx, with an
+     adjustable band for a REPEATABLE pre-load. No vinyl/gardening glove. Mounts
+     on a single segment so it never crosses a joint (doesn't restrict motion).
+     Print in TPU (optional Shining3D scan-to-fit). VERDICT: viable — the
+     make-or-break is repeatable pre-load, which the jig validates across
+     re-wears. See the HLD "Wearable — the finger-mounting carapace" section.
+================================================================================
